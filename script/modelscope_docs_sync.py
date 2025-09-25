@@ -9,6 +9,8 @@ from typing import Dict, Iterable, List, Optional
 
 from modelscope_client import DEFAULT_ENDPOINT, ModelScopeClient
 
+STATE_DIR = Path("output/modelscope_docs/.state")
+
 DEFAULT_OUTPUT_DIR = Path("output/modelscope_docs")
 ALLOWED_SUFFIXES = {
     ".md",
@@ -93,13 +95,32 @@ def dataset_documents(endpoint: str,
     ]
 
 
+def load_previous_hashes(state_file: Path) -> Dict[str, str]:
+    if not state_file.exists():
+        return {}
+    with state_file.open("r", encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def save_hashes(state_file: Path, hashes: Dict[str, str]) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with state_file.open("w", encoding="utf-8") as fp:
+        json.dump(hashes, fp, ensure_ascii=False, indent=2)
+
+
 def sync_documents(client: ModelScopeClient,
                    output_path: Path,
                    max_models: Optional[int],
                    max_datasets: Optional[int]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    state_file = STATE_DIR / "doc_hashes.json"
+    previous_hashes = load_previous_hashes(state_file)
+    current_hashes: Dict[str, str] = {}
+
     model_docs = 0
     dataset_docs = 0
+    skipped = 0
 
     with output_path.open("w", encoding="utf-8") as fp:
         for model in client.iter_models(limit=max_models):
@@ -110,6 +131,11 @@ def sync_documents(client: ModelScopeClient,
             files = client.fetch_model_files(owner, name)
             docs = model_documents(client, owner, name, files)
             for doc in docs:
+                key = f"{doc['repo_id']}|{doc['path']}"
+                current_hashes[key] = doc["sha256"]
+                if previous_hashes.get(key) == doc["sha256"]:
+                    skipped += 1
+                    continue
                 fp.write(json.dumps(doc, ensure_ascii=False) + "\n")
                 model_docs += 1
 
@@ -121,11 +147,18 @@ def sync_documents(client: ModelScopeClient,
             detail = client.fetch_dataset_detail(owner, name)
             docs = dataset_documents(client.endpoint, owner, name, detail)
             for doc in docs:
+                key = f"{doc['repo_id']}|{doc['path']}"
+                current_hashes[key] = doc["sha256"]
+                if previous_hashes.get(key) == doc["sha256"]:
+                    skipped += 1
+                    continue
                 fp.write(json.dumps(doc, ensure_ascii=False) + "\n")
                 dataset_docs += 1
 
+    save_hashes(state_file, current_hashes)
     print(f"Model documents captured: {model_docs}")
     print(f"Dataset documents captured: {dataset_docs}")
+    print(f"Skipped unchanged: {skipped}")
     print(f"Saved documents to {output_path}")
 
 
