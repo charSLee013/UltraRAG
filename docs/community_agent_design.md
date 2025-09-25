@@ -56,8 +56,8 @@
 ## ModelScope Data Ingestion Milestones
 
 **Milestone A — Public Discovery & Snapshot**
-- *Must*: 使用无凭证的 `HubApi`/`repo_info` 拉取指定模型与数据集的公开元数据（名称、下载量、更新时间、README 摘要），并将结果以 JSONL 形式落盘；补充页面爬取兜底方案（当 API 缺字段时，解析 `/summary` 页面得到同等信息）。
-- *May*: 构建轻量脚本对比多次抓取结果，输出字段变化 diff，用于监控 ModelScope 平台改版。
+- *Must*: 使用无凭证的 HTTP 接口全量枚举公开模型与数据集，提取各仓库元数据（名称、下载量、更新时间、README 摘要）并输出结构化快照；当 API 缺字段时回退解析 `/summary` 页面以补齐信息。
+- *May*: 构建快照对比脚本，输出字段变化 diff，用于监控 ModelScope 平台改版。
 
 **Milestone B — 文档抓取与内容筛选**
 - *Must*: 针对模型/数据集仓库，仅同步 README、CHANGELOG、使用指南、FAQ 等文本/代码片段文件（含多语言版本），记录来源 URL、时间戳与哈希；过滤二进制/大文件，确保知识库聚焦解疑资料。
