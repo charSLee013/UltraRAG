@@ -78,6 +78,14 @@
   - 引出视图/查询接口供知识库组件按需拉取。
 - **错误与恢复**：通用重试策略（HTTP/向量库）+ `sync_log` 记账；若运行中断，下次启动仍会从头扫描，依赖 `docs` 中的 hash 做增量跳过，无需额外状态文件。
 - **对接向量库**：Chunker 直接调用向量数据库写接口（或向下游发 event），确保“抓到→入库→写向量库”在一次流水内完成，不落本地冗余副本。
+- **Embedding & Rerank 选型**：
+  - 向量生成统一调用 SiliconFlow API `POST /v1/embeddings`，模型固定为 `BAAI/bge-m3`，请求体遵循 `{"model": "BAAI/bge-m3", "input": [...], "encoding_format": "float"}`；
+  - 重排序阶段使用 SiliconFlow `POST /v1/rerank` 接口，模型固定 `BAAI/bge-reranker-v2-m3`，输入文档列表 + 查询形成 rerank 分数；
+  - 两个 API 均需携带 `Authorization: Bearer <SiliconFlow Token>` 并在同步脚本中共用重试/限速逻辑。
+- **向量数据库**：Chunker 在生成 embedding 后，将结果写入本地 Chroma 数据库：
+  - Collection 命名约定 `modelscope_docs`; 每条记录包含 `id`, `text`, `embedding`, `metadata={repo_type, owner, name, path, chunk_index, sha256, fetched_at}`；
+  - SQLite `chunks` 表保留文本 + 元数据作为旁路缓存，但以 Chroma 为最终检索存储；
+  - 后续 RAG 读取流程：Chroma 检索 → 通过 SiliconFlow reranker 过滤 → 交给生成模型。
 
 **Milestone C — 结构化入库与知识切片**
 - *Must*: 将抓取到的文本资料与 `repo_info` 元数据合并为统一 schema（如 `knowledge_chunks`, `source_meta`），完成基础清洗（Markdown 转纯文本、去噪、语种标注、上下文切片）。

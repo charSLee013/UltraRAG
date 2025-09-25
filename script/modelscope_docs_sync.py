@@ -5,19 +5,33 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Optional
 import uuid
 
 import aiosqlite
+import chromadb
+from chromadb import PersistentClient
+import httpx
+from dotenv import load_dotenv
 
 from modelscope_client import DEFAULT_ENDPOINT, Document, ModelScopeClient, is_textual_file
+
+load_dotenv()
 
 DATABASE_PATH = Path("output/modelscope_docs/docs.sqlite")
 DEFAULT_CHECKPOINT_INTERVAL = 60  # seconds
 DOC_QUEUE_SIZE = 64
 CHUNK_QUEUE_SIZE = 64
 MAX_TEXT_BYTES = 512 * 1024
+CHROMA_PATH = Path(os.environ.get("CHROMA_PATH", "output/modelscope_docs/chroma"))
+CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "modelscope_docs")
+EMBEDDING_API_URL = os.environ["EMBEDDING_API_URL"]
+EMBEDDING_API_KEY = os.environ["EMBEDDING_API_KEY"]
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
+EMBEDDING_BATCH = int(os.environ.get("EMBEDDING_BATCH", "16"))
+EMBEDDING_TIMEOUT = int(os.environ.get("EMBEDDING_TIMEOUT", "60"))
 
 
 def sha256_text(text: str) -> str:
@@ -38,13 +52,6 @@ def split_text(text: str, max_chars: int = 800, overlap: int = 100) -> list[str]
             break
         start = max(0, end - overlap)
     return chunks
-
-
-def generate_embedding(text: str, dimensions: int = 16) -> list[float]:
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    values = [digest[i] for i in range(dimensions)]
-    norm = sum(v * v for v in values) ** 0.5 or 1.0
-    return [v / norm for v in values]
 
 
 async def ensure_schema(db_path: Path) -> None:
@@ -105,6 +112,36 @@ async def ensure_schema(db_path: Path) -> None:
         except aiosqlite.OperationalError:
             pass
         await conn.commit()
+
+
+def batched(iterable: list[str], batch_size: int) -> list[list[str]]:
+    return [iterable[i:i + batch_size] for i in range(0, len(iterable), batch_size)]
+
+
+async def embed_texts(client: httpx.AsyncClient, texts: list[str]) -> list[list[float]]:
+    payload = {
+        "model": EMBEDDING_MODEL,
+        "input": texts,
+        "encoding_format": "float",
+    }
+    backoff = 1.0
+    for attempt in range(5):
+        try:
+            resp = await client.post(
+                EMBEDDING_API_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {EMBEDDING_API_KEY}"},
+                timeout=EMBEDDING_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embeddings = [item["embedding"] for item in data["data"]]
+            return embeddings
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 4:
+                raise
+            await asyncio.sleep(backoff)
+            backoff *= 2
 
 
 async def fetch_documents(client: ModelScopeClient,
@@ -273,7 +310,9 @@ async def chunk_worker(db_path: Path,
                        run_id: str,
                        db_lock: asyncio.Lock) -> dict[str, int]:
     stats = {"chunked": 0, "chunk_failed": 0}
-    async with aiosqlite.connect(db_path) as conn:
+    chroma_client: PersistentClient = PersistentClient(path=str(CHROMA_PATH))
+    collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
+    async with aiosqlite.connect(db_path) as conn, httpx.AsyncClient(timeout=EMBEDDING_TIMEOUT, headers={"Authorization": f"Bearer {EMBEDDING_API_KEY}"}) as embed_client:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA synchronous=NORMAL")
@@ -283,14 +322,22 @@ async def chunk_worker(db_path: Path,
                 break
             chunks = split_text(doc.content)
             try:
+                embeddings: list[list[float]] = []
+                for batch in batched(chunks, EMBEDDING_BATCH):
+                    embeddings.extend(await embed_texts(embed_client, batch))
+                if len(embeddings) != len(chunks):
+                    raise RuntimeError("embedding count mismatch")
+                ids = []
+                metadatas = []
+                documents = []
                 async with db_lock:
                     await conn.execute(
                         "DELETE FROM chunks WHERE repo_type=? AND owner=? AND name=? AND path=?",
                         (doc.repo_type, doc.owner, doc.name, doc.path)
                     )
-                    for idx, chunk_text in enumerate(chunks):
+                    for idx, (chunk_text, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
                         chunk_sha = sha256_text(chunk_text)
-                        embedding_json = json.dumps(generate_embedding(chunk_text))
+                        embedding_json = json.dumps(embedding)
                         await conn.execute(
                             "INSERT INTO chunks (repo_type, owner, name, path, chunk_index, chunk_sha256, content, length, embedding, created_at) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -307,12 +354,25 @@ async def chunk_worker(db_path: Path,
                                 ModelScopeClient.now_utc(),
                             )
                         )
+                        chunk_id = f"{doc.repo_type}:{doc.owner}:{doc.name}:{doc.path}:{idx}"
+                        ids.append(chunk_id)
+                        documents.append(chunk_text)
+                        metadatas.append({
+                            "repo_type": doc.repo_type,
+                            "owner": doc.owner,
+                            "name": doc.name,
+                            "path": doc.path,
+                            "chunk_index": idx,
+                            "sha256": doc.sha256,
+                            "fetched_at": ModelScopeClient.now_utc(),
+                        })
                     await conn.execute(
                         "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
                         "VALUES (?, ?, ?, ?, ?, 'chunked', '', ?)",
                         (run_id, doc.repo_type, doc.owner, doc.name, doc.path, ModelScopeClient.now_utc())
                     )
                     await conn.commit()
+                collection.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
                 stats["chunked"] += 1
             except Exception as exc:  # noqa: BLE001
                 async with db_lock:
@@ -378,6 +438,16 @@ async def run_pipeline(endpoint: str,
     print(f"  ingestion errors: {errors}")
     print(f"  chunked: {chunked}")
     print(f"  chunk errors: {chunk_failed}")
+    summary = {
+        "run_id": run_id,
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "ingestion_errors": errors,
+        "chunked": chunked,
+        "chunk_errors": chunk_failed,
+    }
+    print(json.dumps(summary, ensure_ascii=False))
 
 
 def parse_args() -> argparse.Namespace:
