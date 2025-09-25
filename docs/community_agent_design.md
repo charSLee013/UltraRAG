@@ -60,8 +60,24 @@
 - *May*: 构建快照对比脚本，输出字段变化 diff，用于监控 ModelScope 平台改版。
 
 **Milestone B — 文档抓取与内容筛选**
-- *Must*: 针对模型/数据集仓库，仅同步 README、CHANGELOG、使用指南、FAQ 等文本/代码片段文件（含多语言版本），记录来源 URL、时间戳与哈希；过滤二进制/大文件，确保知识库聚焦解疑资料。
+- *Must*: 针对全部模型/数据集，以异步流水线（见下文）抓取 README、CHANGELOG、使用指南、FAQ 等文本内容，记录来源 URL、时间戳与哈希；过滤非文本及大文件，确保知识库聚焦解疑资料。
 - *May*: 结合社区论坛、Issue、博客等公开页的爬取适配器，扩充高价值问答与教程，并建立重复内容检测规则。
+
+### ModelScope 文档同步架构
+- **异步三段流水线**：
+  1. *Fetcher*（`httpx.AsyncClient`）全量枚举模型与数据集，拉取候选文档后立即推入 `doc_queue`。
+  2. *Ingestor*（多个异步 worker）从 `doc_queue` 消费，使用单一 SQLite 连接（`aiosqlite` + WAL）按文档执行 `SELECT → INSERT/UPDATE`：
+     - 主键：`(repo_type, owner, name, path)`，字段包括 `sha256/size/fetched_at/revision/source_url/content`。
+     - 去重：hash 未变直接标记 `skip`；变更则更新 `docs` 表并将文档推入 `chunk_queue`。
+     - 所有写入围绕单条文档开启事务，失败记录 `sync_log(action='error')` 后继续，保障**原子性**。
+  3. *Chunker*（异步 worker）从 `chunk_queue` 拉取新增/更新内容，按段切分后在 SQLite `chunks` 表记录段文本与 embedding（简单归一化 hash 可满足占位），并在 `sync_log` 标记 `chunked/failed`；同一位置也是写向量数据库的同步触发点，可替换为真实向量库 API。 
+- **SQLite 策略**：启用 `PRAGMA journal_mode=WAL`；定期（按条数或定时）执行 `PRAGMA wal_checkpoint(PASSIVE)`，放置在独立协程中，避免突发异常导致 WAL 未刷新。严格限制并发写入：所有 `INSERT/UPDATE` 由 Ingestor 单线程顺序执行，其他 worker仅读，实现“无死锁 + Unix 哲学的小而美”。
+- **状态与查询**：
+  - `docs` 表始终保存最新有效内容；
+  - `sync_log(run_id, action)` 记录本次同步的 `insert/update/skip/error/chunked`，便于统计和重放；
+  - 引出视图/查询接口供知识库组件按需拉取。
+- **错误与恢复**：通用重试策略（HTTP/向量库）+ `sync_log` 记账；若运行中断，下次启动仍会从头扫描，依赖 `docs` 中的 hash 做增量跳过，无需额外状态文件。
+- **对接向量库**：Chunker 直接调用向量数据库写接口（或向下游发 event），确保“抓到→入库→写向量库”在一次流水内完成，不落本地冗余副本。
 
 **Milestone C — 结构化入库与知识切片**
 - *Must*: 将抓取到的文本资料与 `repo_info` 元数据合并为统一 schema（如 `knowledge_chunks`, `source_meta`），完成基础清洗（Markdown 转纯文本、去噪、语种标注、上下文切片）。
