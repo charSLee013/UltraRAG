@@ -832,11 +832,13 @@ async def run(config_path: str):
         server_cfg[srv_name]["parameter"] = param_cfg.get(srv_name, {})
 
     mcp_cfg = {"mcpServers": {}}
+    import sys as _sys
+    py_exec = _sys.executable or "python"
     for name, sc in server_cfg.items():
         path = sc.get("path", "")
         if path.endswith(".py"):
             mcp_cfg["mcpServers"][name] = {
-                "command": "python",
+                "command": py_exec,
                 "args": [path],
                 "env": os.environ.copy(),
             }
