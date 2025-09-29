@@ -1,2 +1,0 @@
-portrait_input.png -filter -diff -merge
-portrait_output.png -filter -diff -merge
