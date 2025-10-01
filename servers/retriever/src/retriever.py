@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 from flask import Flask, jsonify, request
 from openai import AsyncOpenAI, OpenAIError
+import httpx
 
 
 from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
@@ -78,6 +79,14 @@ class Retriever:
         mcp_inst.tool(
             self.retriever_zhipuai_search,
             output="q_ls,top_k,retrieve_thread_num->ret_psg",
+        )
+        mcp_inst.tool(
+            self.retriever_init_chroma,
+            output="chroma_path,chroma_collection,embedding_api_url,embedding_api_key,embedding_model,embedding_timeout->None",
+        )
+        mcp_inst.tool(
+            self.retriever_search_chroma,
+            output="q_ls,top_k,query_instruction->ret_psg",
         )
 
     def retriever_init(
@@ -579,6 +588,115 @@ class Retriever:
             results.append(top_contents)
 
         return {"ret_psg": results}
+
+    def retriever_init_chroma(
+        self,
+        chroma_path: Optional[str] = None,
+        chroma_collection: str = "modelscope_docs",
+        embedding_api_url: Optional[str] = None,
+        embedding_api_key: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_timeout: Optional[int | str] = None,
+    ):
+        from chromadb import PersistentClient
+
+        chroma_path = chroma_path or os.environ.get("CHROMA_PATH")
+        if not chroma_path:
+            raise ValueError("chroma_path must be provided via parameter or CHROMA_PATH")
+        chroma_path = os.path.expanduser(chroma_path)
+        if not os.path.isdir(chroma_path):
+            raise FileNotFoundError(f"Chroma path does not exist: {chroma_path}")
+
+        collection_name = chroma_collection or os.environ.get("CHROMA_COLLECTION")
+        if not collection_name:
+            raise ValueError("chroma_collection must be specified")
+
+        url = embedding_api_url or os.environ.get("EMBEDDING_API_URL")
+        if not url:
+            raise ValueError("EMBEDDING_API_URL must be set for SiliconFlow embeddings")
+
+        key = embedding_api_key or os.environ.get("EMBEDDING_API_KEY")
+        if not key:
+            raise ValueError("EMBEDDING_API_KEY must be set for SiliconFlow embeddings")
+
+        model = (
+            embedding_model
+            or os.environ.get("EMBEDDING_MODEL")
+            or "BAAI/bge-m3"
+        )
+
+        timeout_candidate = embedding_timeout or os.environ.get("EMBEDDING_TIMEOUT") or 60
+        try:
+            timeout = int(timeout_candidate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("embedding_timeout must be an integer value") from exc
+
+        self.chroma_client = PersistentClient(path=chroma_path)
+        self.chroma_collection = self.chroma_client.get_collection(collection_name)
+        self.chroma_collection_name = collection_name
+        self.embedding_api_url = url
+        self.embedding_api_key = key
+        self.embedding_model = model
+        self.embedding_timeout = timeout
+
+    async def _embed_remote(self, texts: List[str]) -> List[List[float]]:
+        if not hasattr(self, "embedding_api_url"):
+            raise RuntimeError("Chroma retriever is not initialized; call retriever_init_chroma first")
+        if not texts:
+            return []
+
+        payload = {
+            "model": self.embedding_model,
+            "input": texts,
+            "encoding_format": "float",
+        }
+        headers = {"Authorization": f"Bearer {self.embedding_api_key}"}
+
+        backoff = 30.0
+        for attempt in range(5):
+            try:
+                async with httpx.AsyncClient(timeout=self.embedding_timeout) as client:
+                    resp = await client.post(self.embedding_api_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                embeddings = [item["embedding"] for item in data["data"]]
+                if len(embeddings) != len(texts):
+                    raise RuntimeError("Embedding service returned mismatched result count")
+                return embeddings
+            except Exception:
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(backoff)
+
+        raise RuntimeError("Failed to obtain embeddings from SiliconFlow")
+
+    async def retriever_search_chroma(
+        self,
+        query_list: List[str],
+        top_k: int = 5,
+        query_instruction: str = "",
+    ) -> Dict[str, List[List[str]]]:
+        if not hasattr(self, "chroma_collection"):
+            raise RuntimeError("Chroma retriever is not initialized; call retriever_init_chroma first")
+
+        if isinstance(query_list, str):
+            query_list = [query_list]
+        if top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
+
+        queries = [f"{query_instruction}{query}" for query in query_list]
+        embeddings = await self._embed_remote(queries)
+
+        results = self.chroma_collection.query(
+            query_embeddings=embeddings,
+            n_results=top_k,
+        )
+
+        documents = results.get("documents")
+        if documents is None:
+            documents = [[] for _ in query_list]
+
+        return {"ret_psg": documents}
 
     async def retriever_search_lancedb(
         self,

@@ -47,11 +47,11 @@
 - Memory logs double as audit trail for competition submissions.
 
 ## Next Steps
-1. Implement `conversation.context_manager` server.
-2. Import社区文档（FAQ、README、使用指南、论坛精华）并转换成压缩 manifest + FAISS 索引。
-3. Craft community-specific prompt templates with citation scaffolding.
-4. Add specialized diagnostics servers (code execution, configuration tips) as required by problem categories.
-5. Wire automated regression suites leveraging LLM judge to monitor answer quality.
+- [ ] Implement `conversation.context_manager` server.
+- [x] Wire ModelScope ingestion into SiliconFlow + Chroma retriever; pipeline `examples/rag_chroma.yaml` demonstrates the flow（2025-09-29, 负责人：<待指定>）。
+- [ ] Craft community-specific prompt templates with citation scaffolding.
+- [ ] Add specialized diagnostics servers (code execution, configuration tips) as required by problem categories。
+- [ ] Wire automated regression suites leveraging LLM judge to monitor answer quality。
 
 ## ModelScope Data Ingestion Milestones
 
