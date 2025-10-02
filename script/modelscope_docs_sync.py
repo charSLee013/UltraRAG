@@ -17,7 +17,7 @@ from chromadb import PersistentClient
 import httpx
 from dotenv import load_dotenv
 
-from modelscope_client import DEFAULT_ENDPOINT, Document, ModelScopeClient, is_textual_file
+from modelscope_client import DEFAULT_ENDPOINT, Document, ModelScopeClient
 
 load_dotenv()
 
@@ -160,11 +160,53 @@ async def ensure_schema(db_path: Path) -> None:
             await conn.execute("ALTER TABLE chunks ADD COLUMN embedding TEXT")
         except aiosqlite.OperationalError:
             pass
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repo_state (
+                repo_type TEXT,
+                owner     TEXT,
+                name      TEXT,
+                revision  TEXT,
+                PRIMARY KEY (repo_type, owner, name)
+            )
+            """
+        )
         await conn.commit()
 
 
 def batched(iterable: list[str], batch_size: int) -> list[list[str]]:
-    return [iterable[i:i + batch_size] for i in range(0, len(iterable), batch_size)]
+    return [iterable[i : i + batch_size] for i in range(0, len(iterable), batch_size)]
+
+
+def _pick_model_revision(record: dict[str, object]) -> Optional[str]:
+    for key in (
+        "Revision",
+        "RepoRevision",
+        "LatestRevision",
+        "LastCommitId",
+        "LastModifiedTime",
+        "LastUpdatedTime",
+        "GmtModified",
+        "UpdatedAt",
+    ):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+    return None
+
+
+def _pick_dataset_revision(record: Optional[dict[str, object]]) -> Optional[str]:
+    if not record:
+        return None
+    for key in ("Revision", "GmtModified", "UpdatedAt"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+    return None
 
 
 async def embed_texts(client: httpx.AsyncClient, texts: list[str]) -> list[list[float]]:
@@ -194,86 +236,75 @@ async def embed_texts(client: httpx.AsyncClient, texts: list[str]) -> list[list[
 
 
 
-async def fetch_documents(client: ModelScopeClient,
-                          doc_queue: asyncio.Queue,
-                          db_path: Path,
-                          max_models: Optional[int],
-                          max_datasets: Optional[int]) -> None:
+async def fetch_documents(
+    client: ModelScopeClient,
+    doc_queue: asyncio.Queue,
+    db_path: Path,
+    max_models: Optional[int],
+    max_datasets: Optional[int],
+) -> None:
     async with aiosqlite.connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
-            "SELECT repo_type, owner, name, path, revision FROM docs"
+            "SELECT repo_type, owner, name, revision FROM repo_state"
         )
         rows = await cursor.fetchall()
-    existing: dict[tuple[str, str, str, str], str | None] = {
-        (row["repo_type"], row["owner"], row["name"], row["path"]): row["revision"]
+    repo_cache: dict[tuple[str, str, str], Optional[str]] = {
+        (row["repo_type"], row["owner"], row["name"]): row["revision"]
         for row in rows
     }
-    debug(f"fetch bootstrap: cached {len(existing)} entries")
+    debug(f"fetch bootstrap: cached {len(repo_cache)} entries")
 
-    def should_fetch(repo_type: str, owner: str, name: str, path: str, revision: str | None) -> bool:
-        current = existing.get((repo_type, owner, name, path))
-        if current is None:
-            return True
-        if revision is None:
-            return True
-        return current != revision
+    async def queue_doc(doc: Document) -> None:
+        await doc_queue.put(doc)
 
-    queued_models = 0
-    skipped_models = 0
-
+    queued_models = skipped_models = 0
     async for model in client.iter_models(limit=max_models):
         owner = model.get("Path")
         name = model.get("Name")
         if not owner or not name:
             continue
-        files = await client.fetch_model_files(owner, name)
-        for file in files:
-            path_value = file.path
-            if not is_textual_file(path_value, file.size):
-                continue
-            revision = file.revision if isinstance(file.revision, str) else None
-            if not should_fetch("model", owner, name, path_value, revision):
-                skipped_models += 1
-                continue
-            fetched = await client.fetch_model_file_content(file)
-            if not fetched:
-                continue
-            content, source_url = fetched
-            if not content.strip():
-                continue
-            encoded = content.encode("utf-8")
-            if len(encoded) > MAX_TEXT_BYTES:
-                continue
-            sha = sha256_text(content)
-            doc = Document(
-                repo_type="model",
-                owner=owner,
-                name=name,
-                path=path_value,
-                content=content,
-                size=len(encoded),
-                sha256=sha,
-                revision=revision,
-                source_url=source_url or file.source_url or ""
-            )
-            existing[("model", owner, name, path_value)] = revision
-            queued_models += 1
-            if queued_models % 100 == 0:
-                debug(f"queued models: {queued_models} (skipped {skipped_models})")
-            await doc_queue.put(doc)
+        revision = _pick_model_revision(model)
+        key = ("model", owner, name)
+        if repo_cache.get(key) == revision and revision is not None:
+            skipped_models += 1
+            continue
+        readme, source_url = await client.fetch_summary_fallback("model", owner, name)
+        readme = readme.strip()
+        if not readme:
+            continue
+        encoded = readme.encode("utf-8")
+        if len(encoded) > MAX_TEXT_BYTES:
+            continue
+        sha = sha256_text(readme)
+        doc = Document(
+            repo_type="model",
+            owner=owner,
+            name=name,
+            path="README.md",
+            content=readme,
+            size=len(encoded),
+            sha256=sha,
+            revision=(revision or sha),
+            source_url=source_url,
+        )
+        repo_cache[key] = doc.revision
+        queued_models += 1
+        if queued_models % 100 == 0:
+            debug(f"queued models: {queued_models} (skipped {skipped_models})")
+        await queue_doc(doc)
+    debug(f"fetch models: queued={queued_models}, skipped={skipped_models}")
 
-    queued_datasets = 0
-    skipped_datasets = 0
-
+    queued_datasets = skipped_datasets = 0
     async for dataset in client.iter_datasets(limit=max_datasets):
         owner = dataset.get("Namespace") or dataset.get("Owner")
         name = dataset.get("Name")
         if not owner or not name:
             continue
         detail = await client.fetch_dataset_detail(owner, name)
-        revision = detail.get("Revision") if detail else None
-        if not should_fetch("dataset", owner, name, "README.md", revision):
+        revision = _pick_dataset_revision(detail)
+        key = ("dataset", owner, name)
+        if repo_cache.get(key) == revision and revision is not None:
             skipped_datasets += 1
             continue
         content = ""
@@ -284,7 +315,8 @@ async def fetch_documents(client: ModelScopeClient,
             fallback = await client.fetch_summary_fallback("dataset", owner, name)
             content = fallback[0]
             source_url = fallback[1]
-        if not content.strip():
+        content = content.strip()
+        if not content:
             continue
         encoded = content.encode("utf-8")
         if len(encoded) > MAX_TEXT_BYTES:
@@ -298,16 +330,15 @@ async def fetch_documents(client: ModelScopeClient,
             content=content,
             size=len(encoded),
             sha256=sha,
-            revision=revision,
+            revision=(revision or sha),
             source_url=source_url,
         )
-        existing[("dataset", owner, name, "README.md")] = revision
+        repo_cache[key] = doc.revision
         queued_datasets += 1
         if queued_datasets % 100 == 0:
             debug(f"queued datasets: {queued_datasets} (skipped {skipped_datasets})")
-        await doc_queue.put(doc)
-
-    debug(f"fetch done: models queued={queued_models}, skipped={skipped_models}; datasets queued={queued_datasets}, skipped={skipped_datasets}")
+        await queue_doc(doc)
+    debug(f"fetch datasets: queued={queued_datasets}, skipped={skipped_datasets}")
 
 async def ingestor(db_path: Path,
                    doc_queue: asyncio.Queue,
@@ -448,6 +479,11 @@ async def chunk_worker(db_path: Path,
                             "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
                             "VALUES (?, ?, ?, ?, ?, 'chunked', '', ?)",
                             (run_id, doc.repo_type, doc.owner, doc.name, doc.path, log_time),
+                        )
+                        revision_value = doc.revision or doc.sha256
+                        await conn.execute(
+                            "INSERT OR REPLACE INTO repo_state (repo_type, owner, name, revision) VALUES (?, ?, ?, ?)",
+                            (doc.repo_type, doc.owner, doc.name, revision_value),
                         )
                     await conn.commit()
                 except Exception:
