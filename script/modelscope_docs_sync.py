@@ -99,7 +99,7 @@ class TokenBucket:
             self._cond.notify_all()
 
 
-EMBEDDING_LIMITER = TokenBucket(1, 256)
+EMBEDDING_LIMITER = TokenBucket(1, 32)
 
 
 async def ensure_schema(db_path: Path) -> None:
