@@ -15,9 +15,7 @@ pipeline:
 - benchmark.get_data
 - retriever.retriever_init_readme
 # 2. 初始化 (构造 instruction + 问题)
-- prompt.search_o1_init:
-    input:
-      template: prompt/search_o1_reasoning.jinja
+- prompt.search_o1_init
 # 3. 首轮初始生成 (得到初始 reasoning / 可能的第一个 <SEARCH_QUERY>)
 - generation.generate
 # 4. 循环：多轮搜索 + 推理
@@ -36,9 +34,7 @@ pipeline:
               input:
                 q_ls: extract_query_list
           # 4.4 reasoning_indocument
-          - prompt.searcho1_reasoning_indocument:
-              input:
-                reasoning_indoc_template: prompt/search_o1_refinement.jinja
+          - prompt.searcho1_reasoning_indocument
           - generation.generate
           # 4.5 追加 <BEGIN_SEARCH_RESULT> …）
           - prompt.search_o1_insert

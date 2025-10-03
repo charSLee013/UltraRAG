@@ -28,4 +28,5 @@ search_o1_init:
   template: prompt/search_o1_reasoning.jinja
 
 # - searcho1_reasoning_indocument uses this refinement template for in-document reasoning
-reasoning_indoc_template: prompt/search_o1_refinement.jinja
+searcho1_reasoning_indocument:
+  template: prompt/search_o1_refinement.jinja

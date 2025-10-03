@@ -292,15 +292,15 @@ def search_o1_init(
 
 
 @app.prompt(
-    output="prompt_ls,extract_query_list,ret_psg,reasoning_indoc_template->prompt_ls"
+    output="prompt_ls,extract_query_list,ret_psg,template->prompt_ls"
 )
 def searcho1_reasoning_indocument(
     prompt_ls: List[PromptMessage],
     extract_query_list: List[str],
     ret_psg: List[str | Any],
-    reasoning_indoc_template: str | Path,
+    template: str | Path,
 ) -> List[PromptMessage]:
-    template: Template = load_prompt_template(reasoning_indoc_template)
+    template: Template = load_prompt_template(template)
     ret = []
     for prompt, squery, psg in zip(prompt_ls, extract_query_list, ret_psg):
 
