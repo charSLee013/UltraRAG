@@ -69,15 +69,15 @@
   1. *Fetcher*（`httpx.AsyncClient`）全量枚举模型与数据集，拉取候选文档后立即推入 `doc_queue`。
   2. *Ingestor*（多个异步 worker）从 `doc_queue` 消费，使用单一 SQLite 连接（`aiosqlite` + WAL）按文档执行 `SELECT → INSERT/UPDATE`：
      - 主键：`(repo_type, owner, name, path)`，字段包括 `sha256/size/fetched_at/revision/source_url/content`。
-     - 去重：hash 未变直接标记 `skip`；变更则更新 `docs` 表并将文档推入 `chunk_queue`。
-     - 所有写入围绕单条文档开启事务，失败记录 `sync_log(action='error')` 后继续，保障**原子性**。
-  3. *Chunker*（异步 worker）从 `chunk_queue` 拉取新增/更新内容，按段切分后在 SQLite `chunks` 表记录段文本与 embedding（简单归一化 hash 可满足占位），并在 `sync_log` 标记 `chunked/failed`；同一位置也是写向量数据库的同步触发点，可替换为真实向量库 API。 
+     - 去重：hash 未变直接跳过（不额外记账）；变更则更新 `docs` 表并将文档推入 `chunk_queue`。
+     - 所有写入围绕单条文档开启事务，失败直接抛错（fail-fast），依靠 `INGEST_DEBUG=1` 的调试日志定位问题。
+  3. *Chunker*（异步 worker）从 `chunk_queue` 拉取新增/更新内容，按段切分后在 SQLite `chunks` 表记录段文本与 embedding；同一位置也是写向量数据库的同步触发点，可替换为真实向量库 API。
 - **SQLite 策略**：启用 `PRAGMA journal_mode=WAL`；定期（按条数或定时）执行 `PRAGMA wal_checkpoint(PASSIVE)`，放置在独立协程中，避免突发异常导致 WAL 未刷新。严格限制并发写入：所有 `INSERT/UPDATE` 由 Ingestor 单线程顺序执行，其他 worker仅读，实现“无死锁 + Unix 哲学的小而美”。
 - **状态与查询**：
   - `docs` 表始终保存最新有效内容；
-  - `sync_log(run_id, action)` 记录本次同步的 `insert/update/skip/error/chunked`，便于统计和重放；
+  - 使用最小化统计（insert/update/chunked）与 `debug()` 调试日志观察运行状况；
   - 引出视图/查询接口供知识库组件按需拉取。
-- **错误与恢复**：通用重试策略（HTTP/向量库）+ `sync_log` 记账；若运行中断，下次启动仍会从头扫描，依赖 `docs` 中的 hash 做增量跳过，无需额外状态文件。
+- **错误与恢复**：失败抛错（不吞异常），下次启动依赖 `docs` 的 hash 与 `repo_state` 的 revision 做增量跳过，无需额外日志表。
 - **对接向量库**：Chunker 直接调用向量数据库写接口（或向下游发 event），确保“抓到→入库→写向量库”在一次流水内完成，不落本地冗余副本。
 - **Embedding & Rerank 选型**：
   - 向量生成统一调用 SiliconFlow API `POST /v1/embeddings`，模型固定为 `BAAI/bge-m3`，请求体遵循 `{"model": "BAAI/bge-m3", "input": [...], "encoding_format": "float"}`；

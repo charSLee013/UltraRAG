@@ -21,9 +21,9 @@
 3. **数据存储结构**（目录 `output/modelscope_docs/`）
    - `docs.sqlite`：
      - `docs`: 仅说明文档文本及 SHA；主键 `(repo_type, owner, name, path)`。
-     - `chunks`: 切片文本 + 嵌入（JSON）；
-     - `sync_log`: 记录 `insert/update/skip/error/chunked`；
+     - `chunks`: 切片文本 + 嵌入（JSON）。
      - `repo_state`: 仓库 revision 缓存。
+   - 不再维护 `sync_log`（排查靠 debug() 日志与最小化统计）。
    - Chroma 集合 `modelscope_docs`（`CHROMA_PATH`）：documents、embeddings、metadata 与 `chunks` 对齐。
 
 4. **嵌入速率限制**
@@ -32,7 +32,7 @@
 
 5. **批量写入与并发**
    - 默认 `CHUNK_WORKERS = 64` 并发消费者。
-   - `chunk_worker` 缓冲 20~50 条切片后一次事务写入 `chunks/sync_log`，提交成功再 upsert Chroma。
+   - `chunk_worker` 缓冲 20~50 条切片后一次事务写入 `chunks`，提交成功再 upsert Chroma。
    - SQLite 使用 `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA busy_timeout=3000`；失败回滚并抛错。
 
 6. **参数与环境**
@@ -45,7 +45,7 @@
    - 嵌入阶段利用令牌桶并发；`chunk_worker` 批量写入并更新 `repo_state`。
 2. **配置/文档**：更新 `.env.example`、`servers/retriever/parameter.yaml`、`AGENTS.md`、`docs/community_agent_design.md` 说明上述限制。
 3. **验证**：
-   - 运行同步脚本确保 `docs/chunks` 仅含说明文档；必要时打开 `INGEST_DEBUG=1` 观察进度。
+   - 运行同步脚本确保 `docs/chunks` 仅含说明文档；必要时打开 `INGEST_DEBUG=1` 使用 `debug()` 输出观察进度与故障点。
    - 检索示例 `ultrarag run examples/rag.yaml` 应引用说明文本；
    - 重复运行时，未变化的仓库应在 fetch 前被跳过。
 4. **回滚**：如要恢复旧逻辑，先修订 SOP，再调整代码；禁止私下偏离规格。

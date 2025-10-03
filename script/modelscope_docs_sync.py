@@ -416,7 +416,7 @@ async def ingestor(db_path: Path,
                    chunk_queue: asyncio.Queue,
                    run_id: str,
                    db_lock: asyncio.Lock) -> dict[str, int]:
-    stats = {"insert": 0, "update": 0, "skip": 0, "error": 0}
+    stats = {"insert": 0, "update": 0}
     async with aiosqlite.connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
@@ -436,7 +436,7 @@ async def ingestor(db_path: Path,
                     )
                     row = await cursor.fetchone()
                     if row and row["sha256"] == doc.sha256:
-                        stats["skip"] += 1
+                        # unchanged; skip without extra counters
                         continue
                     if row:
                         await conn.execute(
@@ -479,7 +479,6 @@ async def ingestor(db_path: Path,
                 await chunk_queue.put(doc)
             except Exception as exc:  # noqa: BLE001
                 debug(f"ingestor error: {exc}")
-                stats["error"] += 1
         return stats
 
 
@@ -487,7 +486,7 @@ async def chunk_worker(db_path: Path,
                        chunk_queue: asyncio.Queue,
                        run_id: str,
                        db_lock: asyncio.Lock) -> dict[str, int]:
-    stats = {"chunked": 0, "chunk_failed": 0}
+    stats = {"chunked": 0}
     chroma_client: PersistentClient = PersistentClient(path=str(CHROMA_PATH))
     collection = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
     async with aiosqlite.connect(db_path) as conn, httpx.AsyncClient(
@@ -609,7 +608,7 @@ async def chunk_worker(db_path: Path,
                     await flush_pending()
                 stats["chunked"] += 1
             except Exception as exc:  # noqa: BLE001
-                stats["chunk_failed"] += 1
+                debug(f"chunk_worker error: {exc}")
         return stats
 
 
@@ -656,27 +655,18 @@ async def run_pipeline(endpoint: str,
         await checkpoint_task
 
     chunked = sum(stats.get("chunked", 0) for stats in chunk_stats_list)
-    chunk_failed = sum(stats.get("chunk_failed", 0) for stats in chunk_stats_list)
 
     inserted = ingest_stats.get("insert", 0)
     updated = ingest_stats.get("update", 0)
-    skipped = ingest_stats.get("skip", 0)
-    errors = ingest_stats.get("error", 0)
     print(f"Run {run_id} complete")
     print(f"  inserted: {inserted}")
     print(f"  updated: {updated}")
-    print(f"  skipped: {skipped}")
-    print(f"  ingestion errors: {errors}")
     print(f"  chunked: {chunked}")
-    print(f"  chunk errors: {chunk_failed}")
     summary = {
         "run_id": run_id,
         "inserted": inserted,
         "updated": updated,
-        "skipped": skipped,
-        "ingestion_errors": errors,
         "chunked": chunked,
-        "chunk_errors": chunk_failed,
     }
     print(json.dumps(summary, ensure_ascii=False))
 
