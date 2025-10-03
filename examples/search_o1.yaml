@@ -32,7 +32,7 @@ pipeline:
           # 4.3 执行检索 (将抽取的 query 列表传入)
           - retriever.retriever_search_readme:
               input:
-                q_ls: extract_query_list
+                query_list: extract_query_list
           # 4.4 reasoning_indocument
           - prompt.searcho1_reasoning_indocument
           - generation.generate
