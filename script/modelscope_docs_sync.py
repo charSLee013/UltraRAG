@@ -48,19 +48,104 @@ def sha256_text(text: str) -> str:
 
 
 def split_text(text: str, max_chars: int = 800, overlap: int = 100) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
-    chunks: list[str] = []
-    start = 0
-    length = len(text)
-    while start < length:
-        end = min(length, start + max_chars)
-        chunk = text[start:end]
-        chunks.append(chunk)
-        if end == length:
-            break
-        start = max(0, end - overlap)
-    return chunks
+    text = text.strip()
+    if not text:
+        return []
+
+    def sliding(block: str) -> list[str]:
+        block = block.strip()
+        if not block:
+            return []
+        segments: list[str] = []
+        start = 0
+        length = len(block)
+        step = max(1, max_chars - overlap)
+        while start < length:
+            end = min(length, start + max_chars)
+            segment = block[start:end].strip()
+            if segment:
+                segments.append(segment)
+            if end == length:
+                break
+            start += step
+        return segments
+
+    def split_recursive(block: str) -> list[str]:
+        block = block.strip()
+        if not block:
+            return []
+        if len(block) <= max_chars:
+            return [block]
+
+        # split by double newline (paragraph)
+        paragraphs = [p for p in block.split('\n\n') if p.strip()]
+        if len(paragraphs) > 1:
+            parts: list[str] = []
+            for para in paragraphs:
+                parts.extend(split_recursive(para))
+            return parts
+
+        # split by headings or bullet points
+        lines = block.split('\n')
+        sections: list[list[str]] = []
+        current: list[str] = []
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith('#') or stripped.startswith('- ') or stripped.startswith('* '):
+                if current:
+                    sections.append(current)
+                    current = []
+            current.append(line)
+        if current:
+            sections.append(current)
+        if len(sections) > 1:
+            parts = []
+            for section in sections:
+                parts.extend(split_recursive('\n'.join(section)))
+            return parts
+
+        # split by sentence boundaries
+        import re
+        sentences = [s for s in re.split(r'(?<=[。！？.!?])\s+', block) if s]
+        if len(sentences) > 1:
+            chunks: list[str] = []
+            current = ''
+            for sentence in sentences:
+                candidate = (current + ' ' + sentence).strip() if current else sentence
+                if len(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    if len(sentence) <= max_chars:
+                        current = sentence
+                    else:
+                        chunks.extend(sliding(sentence))
+                        current = ''
+            if current:
+                chunks.append(current)
+            return chunks
+
+        return sliding(block)
+
+    segments: list[str] = []
+    paragraphs = [p for p in text.split('\n\n') if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+    for para in paragraphs:
+        segments.extend(split_recursive(para))
+
+    if overlap <= 0 or len(segments) <= 1:
+        return segments
+
+    merged: list[str] = []
+    prev_tail = ''
+    for segment in segments:
+        if prev_tail:
+            segment = (prev_tail + ' ' + segment).strip()
+        merged.append(segment)
+        prev_tail = segment[-overlap:].strip() if len(segment) > overlap else segment
+    return merged
 
 
 class TokenBucket:
