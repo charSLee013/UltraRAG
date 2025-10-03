@@ -599,6 +599,8 @@ async def chunk_worker(db_path: Path,
                             "path": doc.path,
                             "chunk_index": idx,
                             "sha256": doc.sha256,
+                            "revision": doc.revision,
+                            "source_url": doc.source_url,
                             "fetched_at": timestamp,
                         }
                     )

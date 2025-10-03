@@ -11,9 +11,9 @@ servers:
 
 # MCP Client Pipeline
 pipeline:
-- retriever.retriever_init_chroma
+- retriever.retriever_init_readme
 - benchmark.get_data
-- retriever.retriever_search_chroma
+- retriever.retriever_search_readme
 - prompt.qa_rag_boxed
 - generation.generate
 - custom.output_extract_from_boxed

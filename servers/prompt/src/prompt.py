@@ -298,9 +298,9 @@ def searcho1_reasoning_indocument(
     prompt_ls: List[PromptMessage],
     extract_query_list: List[str],
     ret_psg: List[str | Any],
-    template: str | Path,
+    reasoning_indoc_template: str | Path,
 ) -> List[PromptMessage]:
-    template: Template = load_prompt_template(template)
+    template: Template = load_prompt_template(reasoning_indoc_template)
     ret = []
     for prompt, squery, psg in zip(prompt_ls, extract_query_list, ret_psg):
 

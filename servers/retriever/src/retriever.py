@@ -81,12 +81,22 @@ class Retriever:
             output="q_ls,top_k,retrieve_thread_num->ret_psg",
         )
         mcp_inst.tool(
-            self.retriever_init_chroma,
+            self.retriever_init_readme,
             output="chroma_path,chroma_collection,embedding_api_url,embedding_api_key,embedding_model,embedding_timeout->None",
         )
         mcp_inst.tool(
-            self.retriever_search_chroma,
-            output="q_ls,top_k,query_instruction->ret_psg",
+            self.retriever_search_readme,
+            output="q_ls,top_k,query_instruction->ret_psg,metadata",
+        )
+        mcp_inst.tool(
+            self.retriever_init_readme,
+            name="retriever_init_chroma",
+            output="chroma_path,chroma_collection,embedding_api_url,embedding_api_key,embedding_model,embedding_timeout->None",
+        )
+        mcp_inst.tool(
+            self.retriever_search_readme,
+            name="retriever_search_chroma",
+            output="q_ls,top_k,query_instruction->ret_psg,metadata",
         )
 
     def retriever_init(
@@ -589,7 +599,7 @@ class Retriever:
 
         return {"ret_psg": results}
 
-    def retriever_init_chroma(
+    def retriever_init_readme(
         self,
         chroma_path: Optional[str] = None,
         chroma_collection: str = "modelscope_docs",
@@ -641,7 +651,7 @@ class Retriever:
 
     async def _embed_remote(self, texts: List[str]) -> List[List[float]]:
         if not hasattr(self, "embedding_api_url"):
-            raise RuntimeError("Chroma retriever is not initialized; call retriever_init_chroma first")
+            raise RuntimeError("README retriever is not initialized; call retriever_init_readme first")
         if not texts:
             return []
 
@@ -670,14 +680,14 @@ class Retriever:
 
         raise RuntimeError("Failed to obtain embeddings from SiliconFlow")
 
-    async def retriever_search_chroma(
+    async def retriever_search_readme(
         self,
         query_list: List[str],
         top_k: int = 5,
         query_instruction: str = "",
-    ) -> Dict[str, List[List[str]]]:
+    ) -> Dict[str, Any]:
         if not hasattr(self, "chroma_collection"):
-            raise RuntimeError("Chroma retriever is not initialized; call retriever_init_chroma first")
+            raise RuntimeError("README retriever is not initialized; call retriever_init_readme first")
 
         if isinstance(query_list, str):
             query_list = [query_list]
@@ -690,13 +700,35 @@ class Retriever:
         results = self.chroma_collection.query(
             query_embeddings=embeddings,
             n_results=top_k,
+            include=["documents", "metadatas", "distances"],
         )
 
-        documents = results.get("documents")
-        if documents is None:
-            documents = [[] for _ in query_list]
+        documents = results.get("documents") or [[] for _ in query_list]
+        metadatas = results.get("metadatas") or [[] for _ in query_list]
+        distances = results.get("distances") or [[] for _ in query_list]
 
-        return {"ret_psg": documents}
+        ret_psg: List[List[str]] = []
+        metadata_rows: List[List[Dict[str, Any]]] = []
+        for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
+            ret_psg.append(doc_items)
+            row: List[Dict[str, Any]] = []
+            for meta, score in zip(meta_items, dist_items):
+                meta = meta or {}
+                row.append(
+                    {
+                        "repo_type": meta.get("repo_type"),
+                        "owner": meta.get("owner"),
+                        "name": meta.get("name"),
+                        "path": meta.get("path"),
+                        "chunk_index": meta.get("chunk_index"),
+                        "source_url": meta.get("source_url"),
+                        "revision": meta.get("revision"),
+                        "score": float(score) if score is not None else None,
+                    }
+                )
+            metadata_rows.append(row)
+
+        return {"ret_psg": ret_psg, "metadata": metadata_rows}
 
     async def retriever_search_lancedb(
         self,

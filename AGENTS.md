@@ -12,6 +12,9 @@ Follow standard Python 3.11 guidelines: four-space indents, double quotes for us
 ## Testing Guidelines
 Author tests with `pytest`; place them in `tests/` mirroring the package path (`tests/servers/test_router.py`). Use descriptive `test_<scenario>_<expected>()` names and fixture files in `data/` where appropriate. Run `pytest` locally before opening a pull request, and include CLI smoke-tests (`ultrarag run ...`) in your manual checklist when adding new pipelines or servers. Target meaningful coverage of branching logic, especially MCP tool dispatch and error handling.
 
+
+## Retrieval Data Sources
+README ingestion writes to `output/modelscope_docs/chroma`; retriever pipelines must use `retriever_init_readme` / `retriever_search_readme`, which return README segments plus metadata (`repo_type/owner/name/path/source_url/revision`).
 ## Specification-First Development
 Every feature or significant change must have an SOP entry under `docs/sop/` before coding begins. Treat the SOP as the single source of truth: update the spec and implementation plan first, then implement code and other artifacts strictly following the SOP. If requirements change, revise the SOP prior to any code edits.
 
