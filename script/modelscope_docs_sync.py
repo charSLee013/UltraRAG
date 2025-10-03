@@ -127,20 +127,6 @@ async def ensure_schema(db_path: Path) -> None:
         )
         await conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS sync_log (
-                run_id     TEXT,
-                repo_type  TEXT,
-                owner      TEXT,
-                name       TEXT,
-                path       TEXT,
-                action     TEXT,
-                message    TEXT,
-                logged_at  TEXT
-            )
-            """
-        )
-        await conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS chunks (
                 repo_type   TEXT,
                 owner       TEXT,
@@ -365,12 +351,6 @@ async def ingestor(db_path: Path,
                     )
                     row = await cursor.fetchone()
                     if row and row["sha256"] == doc.sha256:
-                        await conn.execute(
-                            "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
-                            "VALUES (?, ?, ?, ?, ?, 'skip', '', ?)",
-                            (run_id, doc.repo_type, doc.owner, doc.name, doc.path, ModelScopeClient.now_utc())
-                        )
-                        await conn.commit()
                         stats["skip"] += 1
                         continue
                     if row:
@@ -409,22 +389,11 @@ async def ingestor(db_path: Path,
                             )
                         )
                         action = "insert"
-                    await conn.execute(
-                        "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, '', ?)",
-                        (run_id, doc.repo_type, doc.owner, doc.name, doc.path, action, ModelScopeClient.now_utc())
-                    )
                     await conn.commit()
                 stats[action] += 1
                 await chunk_queue.put(doc)
             except Exception as exc:  # noqa: BLE001
-                async with db_lock:
-                    await conn.execute(
-                        "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
-                        "VALUES (?, ?, ?, ?, ?, 'error', ?, ?)",
-                        (run_id, doc.repo_type, doc.owner, doc.name, doc.path, str(exc), ModelScopeClient.now_utc())
-                    )
-                    await conn.commit()
+                debug(f"ingestor error: {exc}")
                 stats["error"] += 1
         return stats
 
@@ -475,11 +444,6 @@ async def chunk_worker(db_path: Path,
                                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                 chunk_rows,
                             )
-                        await conn.execute(
-                            "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
-                            "VALUES (?, ?, ?, ?, ?, 'chunked', '', ?)",
-                            (run_id, doc.repo_type, doc.owner, doc.name, doc.path, log_time),
-                        )
                         revision_value = doc.revision or doc.sha256
                         await conn.execute(
                             "INSERT OR REPLACE INTO repo_state (repo_type, owner, name, revision) VALUES (?, ?, ?, ?)",
@@ -558,13 +522,6 @@ async def chunk_worker(db_path: Path,
                     await flush_pending()
                 stats["chunked"] += 1
             except Exception as exc:  # noqa: BLE001
-                async with db_lock:
-                    await conn.execute(
-                        "INSERT INTO sync_log (run_id, repo_type, owner, name, path, action, message, logged_at) "
-                        "VALUES (?, ?, ?, ?, ?, 'chunk_failed', ?, ?)",
-                        (run_id, doc.repo_type, doc.owner, doc.name, doc.path, str(exc), ModelScopeClient.now_utc()),
-                    )
-                    await conn.commit()
                 stats["chunk_failed"] += 1
         return stats
 

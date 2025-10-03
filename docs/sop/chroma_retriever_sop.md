@@ -45,7 +45,7 @@
    - 嵌入阶段利用令牌桶并发；`chunk_worker` 批量写入并更新 `repo_state`。
 2. **配置/文档**：更新 `.env.example`、`servers/retriever/parameter.yaml`、`AGENTS.md`、`docs/community_agent_design.md` 说明上述限制。
 3. **验证**：
-   - 运行同步脚本确保 `docs/chunks` 仅含说明文档；
+   - 运行同步脚本确保 `docs/chunks` 仅含说明文档；必要时打开 `INGEST_DEBUG=1` 观察进度。
    - 检索示例 `ultrarag run examples/rag.yaml` 应引用说明文本；
    - 重复运行时，未变化的仓库应在 fetch 前被跳过。
 4. **回滚**：如要恢复旧逻辑，先修订 SOP，再调整代码；禁止私下偏离规格。
