@@ -7,16 +7,20 @@
 在 MCP 框架下，针对 README/说明类文档构建检索能力，为默认 RAG 以及 Search-o1/S1 等范式提供直接命中说明段落的能力。
 
 ## 约束与现状
-- 范围仅限 `script/modelscope_docs_sync.py` 同步的 README 集合，不接入模型二进制、代码文件或其他非说明文本。
-- 数据现状：README 已写入 `output/modelscope_docs/chroma`，`repo_state` 缓存 `(repo_type, owner, name)` 与最新版 revision。
-- 检索逻辑仍调用旧工具（`retriever_search_chroma` 占位）；Search-o1/S1 YAML 未切换到 README 数据源。
-- 编程风格：遵循最小化与 fail-fast 原则，不引入防御式兜底、备用实现或噪声日志。任何错误应直接抛出，供上游处理。
+- 范围仅限 `script/modelscope_docs_sync.py` 同步的 README/说明集合，不接入模型二进制、代码文件或其他非说明文本。
+- 数据现状：README 向量索引位于 `output/modelscope_docs/chroma`；SQLite 仅含 `docs/chunks/repo_state` 三表，支持基于 `(repo_type, owner, name)` 的增量跳过。
+- 检索工具已就位：`retriever_init_readme` / `retriever_search_readme` 已在 `servers/retriever/src/retriever.py` 实现；旧名 `retriever_init_chroma` / `retriever_search_chroma` 作为别名直连新实现（向后兼容）。
+- YAML 已切换：`examples/rag.yaml`、`examples/search_o1.yaml` 使用 README 检索工具；Search‑o1 所需模板在 `servers/prompt/parameter.yaml` 中声明。
+- 编程风格：最小化 + fail-fast；不做防御式兜底、不保留备用分支、不输出噪声日志。
+
+## 环境变量与参数
+- 必需：`CHROMA_PATH`、`CHROMA_COLLECTION`（默认 `modelscope_docs`）、`EMBEDDING_API_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`（默认 `BAAI/bge-m3`）、`EMBEDDING_TIMEOUT`（秒，默认 60）。
+- 仅加入最小必要项；其余配置通过 YAML/参数文件传入，避免冗余。
 
 ## 规格（Spec）
 1. **工具设计**
-   - 在 `servers/retriever/src/retriever.py` 新增 README 专用工具（如 `retriever_init_readme` / `retriever_search_readme`）。
-   - 工具需初始化 Chroma 客户端，连接集合 `modelscope_docs`，并保留令牌桶 / 批量逻辑。
-   - 查询返回结构：`{"ret_psg": [[段落文本...]], "metadata": [[{"repo_type":..., "owner":..., "name":..., "source_url":..., "revision":...}, ...]]}` 或等价字段，使后续 prompt / reranker 能直接引用。
+   - 工具：`retriever_init_readme(chroma_path?, chroma_collection?, embedding_api_url?, embedding_api_key?, embedding_model?, embedding_timeout?)` 初始化 Chroma 与嵌入端点；`retriever_search_readme(query_list, top_k=5, query_instruction="")` 返回 README 段落+元数据。
+   - 返回结构：`{"ret_psg": [[...]], "metadata": [[{"repo_type","owner","name","path","source_url","revision","score"}, ...]]}`，用于下游渲染与溯源。
 2. **YAML 对接**
    - 更新 `examples/rag.yaml`、`search_o1.yaml` 等，使检索步骤调用新工具。
    - 若 Search-o1/S1 需要多轮检索，保持现有 loop 结构不变，仅替换底层检索工具。
@@ -39,4 +43,3 @@
 - README 工具返回的 metadata 包含 `repo_type/owner/name`，可用于后续引用/跳转。
 - pipeline 输出中引用的文本应来自 README；随机抽样验证链接指向 ModelScope README。
 - 大规模运行时性能不回退（受到 API 限速时表现与同步阶段一致）。
-
