@@ -25,7 +25,7 @@
    - Persist logs to `output/memory_*` for traceability.
 
 ## Key Modules & Enhancements
-- **README Retriever**: 使用 `servers/retriever` 中的 `retriever_init_readme` + `retriever_search_readme`，直接命中 README 段落，metadata 携带 `repo_type/owner/name/path/source_url/revision` 供后续引用。
+- **README Retriever**: 使用 `servers/retriever` 中的 `retriever_init_readme` + `retriever_search_readme`，直接命中 README 段落；检索返回的 metadata 仅包含最小合同 `repo_author/repo_name` 与 `score`（可选 `clean_state`）。
 - **Conversation Memory**: new server managing session state, storing prior QA pairs, handing context to prompt generation.
 - **Inline vs Dataset Input**: `servers/benchmark` already supports JSONL and inline queries; competition datasets can override via `path + key_map`.
 - **Retrieval**: FAISS cache ensures sub-second lookups; fallback to fresh embedding only when corpus changes.

@@ -17,7 +17,7 @@
 2) 《README Retriever Integration》（docs/sop/README_Retriever_SOP.md）
 - 工具：`retriever_init_readme` / `retriever_search_readme`；旧名 `retriever_init_chroma` / `retriever_search_chroma` 直连新实现（向后兼容）。
 - YAML：检索步骤切换到 README 工具；Search‑o1 复用原有循环结构。
-- 返回：段落 `ret_psg` + 元数据 `repo_type/owner/name/path/source_url/revision/score`。
+- 返回：段落 `ret_psg` + 最小元数据合同 `repo_author/repo_name/score`（可选 `clean_state`）。
 - 成果：在具备网络与嵌入服务时，`examples/retriever_search_only*.yaml` 与 Search‑o1 能真实命中 README 片段（见 output/*memory_nq_retriever_search_only*.json 与 *search_o1*.json 运行记录）。
 
 已发现的遗留问题（需在本 SOP 解决）
@@ -57,19 +57,19 @@
 - 文件：`servers/retriever/src/retriever.py`（`retriever_search_readme`）。
 - 行为：插入“解码→抽取→HTML 去噪→回填 clean_state”的管道；为异常添加可诊断的 warning（仅 DEBUG 显示样本片段）。
 
-2) 元数据补全脚本
-- 文件：`script/backfill_modelscope_metadata.py`；支持 dry‑run 与批量写回；输出 CSV 审计文件到 `logs/`。
+2) 元数据最小化（无需补全脚本）
+- 不进行运行时兜底生成，也不强制回填 URL/Revision；仅保证检索返回包含 `repo_author/repo_name/score`。
 
 3) 嵌入参数化
 - 文件：`servers/retriever/src/retriever.py`（`_embed_remote` 与 `retriever_init_readme` 参数）；`.env.example` 补充字段；`servers/retriever/parameter.yaml` 对应键。
 
 4) 测试与示例
 - 新增：`tests/servers/test_retriever_readme.py`
-  - 合同：所有命中项 `repo_type/owner/name/path` 非空；`source_url/revision` 覆盖率 ≥ 99%。
+  - 合同：所有命中项 `repo_author/repo_name` 非空；字段不包含 `source_url/revision/path`。
   - 别名一致性：`retriever_search_readme` 与 `retriever_search_chroma` 结果相同（top_k、排序与字段）。
   - 清洗正确性：当输入为 JSON/HTML 时 `clean_state` 合法且 `ret_psg` 为可读文本。
   - 错误路径：缺 `CHROMA_PATH`、无效 API Key、`top_k<=0`。
-- 示例：保留 `examples/retriever_search_only.yaml` 与 `examples/retriever_search_only_alias.yaml`；在 README 增加“一键验收”命令。
+  - 示例：保留 `examples/retriever_search_only.yaml` 与 `examples/retriever_search_only_alias.yaml`；在 README 增加“一键验收”命令。
 
 ## 质量验收清单（真实跑通）
 功能验证

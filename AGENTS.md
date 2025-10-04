@@ -14,7 +14,7 @@ Author tests with `pytest`; place them in `tests/` mirroring the package path (`
 
 
 ## Retrieval Data Sources
-README ingestion writes to `output/modelscope_docs/chroma`; retriever pipelines must use `retriever_init_readme` / `retriever_search_readme`, which return README segments plus metadata (`repo_type/owner/name/path/source_url/revision`).
+README ingestion writes to `output/modelscope_docs/chroma`; retriever pipelines must use `retriever_init_readme` / `retriever_search_readme`, which return README segments plus minimal metadata (`repo_author/repo_name`, with `score`; optional `clean_state`).
 ## Specification-First Development
 Every feature or significant change must have an SOP entry under `docs/sop/` before coding begins. Treat the SOP as the single source of truth: update the spec and implementation plan first, then implement code and other artifacts strictly following the SOP. If requirements change, revise the SOP prior to any code edits.
 
