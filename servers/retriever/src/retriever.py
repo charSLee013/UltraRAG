@@ -16,6 +16,7 @@ import httpx
 
 from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
 from ultrarag.server import UltraRAG_MCP_Server
+from ultrarag.utils import normalize_readme_text
 from pathlib import Path
 
 app = UltraRAG_MCP_Server("retriever")
@@ -710,9 +711,13 @@ class Retriever:
         ret_psg: List[List[str]] = []
         metadata_rows: List[List[Dict[str, Any]]] = []
         for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
-            ret_psg.append(doc_items)
+            cleaned_docs: List[str] = []
             row: List[Dict[str, Any]] = []
-            for meta, score in zip(meta_items, dist_items):
+            for doc, meta, score in zip(doc_items, meta_items, dist_items):
+                # Normalize document text (JSON-unescape and HTML-strip)
+                cleaned_text, clean_state = normalize_readme_text(doc)
+                cleaned_docs.append(cleaned_text)
+
                 meta = meta or {}
                 row.append(
                     {
@@ -724,8 +729,10 @@ class Retriever:
                         "source_url": meta.get("source_url"),
                         "revision": meta.get("revision"),
                         "score": float(score) if score is not None else None,
+                        "clean_state": clean_state,
                     }
                 )
+            ret_psg.append(cleaned_docs)
             metadata_rows.append(row)
 
         return {"ret_psg": ret_psg, "metadata": metadata_rows}

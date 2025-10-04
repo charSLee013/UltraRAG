@@ -3,7 +3,10 @@ import logging
 import os
 import signal
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+import re as _re
+import html as _html
+import json as _json
 
 IS_POSIX = os.name == "posix"
 IS_WINDOWS = os.name == "nt"
@@ -118,3 +121,67 @@ def popen_follow_parent(command: List[str], env: Optional[Dict[str, str]] = None
         return proc
     else:
         return subprocess.Popen(command, env=env)
+
+
+def normalize_readme_text(text: Optional[str]) -> Tuple[str, str]:
+    """Normalize README content to readable plain text.
+
+    Steps:
+    - Try JSON decoding up to 2 passes to unwrap escaped payloads.
+    - If a dict is found, prefer fields like ReadMeContent/readme/content/text.
+    - Strip HTML tags (preserve basic line breaks) and HTML-unescape entities.
+
+    Returns (clean_text, clean_state) where clean_state in
+    {"html_stripped", "json_decoded", "raw"}.
+    """
+    if text is None:
+        return "", "raw"
+
+    s = str(text)
+    clean_state = "raw"
+    decoded = False
+
+    # Attempt to decode JSON-escaped content up to two times
+    for _ in range(2):
+        s_stripped = s.strip()
+        if not s_stripped:
+            break
+        try:
+            obj = _json.loads(s_stripped)
+        except Exception:
+            break
+
+        decoded = True
+        if isinstance(obj, str):
+            s = obj
+            continue
+        if isinstance(obj, dict):
+            for key in ("ReadMeContent", "readme", "ReadmeContent", "content", "text"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    s = val
+                    break
+            else:
+                # Fallback: stringify to avoid returning an opaque dict
+                s = _json.dumps(obj, ensure_ascii=False)
+            break
+        # Non-dict/non-str payload: stop
+        break
+
+    if decoded:
+        clean_state = "json_decoded"
+
+    # Preserve basic line breaks for <br> then drop tags
+    pre = s
+    s = _re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = _re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", s)
+    s_no_tags = _re.sub(r"(?s)<[^>]+>", "", s)
+    if s_no_tags != pre:
+        clean_state = "html_stripped"
+
+    # Unescape HTML entities and normalize whitespace
+    s_out = _html.unescape(s_no_tags)
+    s_out = _re.sub(r"[ \t]+", " ", s_out)
+    s_out = _re.sub(r"\n{3,}", "\n\n", s_out)
+    s_out = s_out.strip()
+    return s_out, clean_state
