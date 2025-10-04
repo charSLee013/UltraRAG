@@ -1,0 +1,11 @@
+# Retriever search smoke test using legacy aliases
+
+servers:
+  benchmark: servers/benchmark
+  retriever: servers/retriever
+
+pipeline:
+- benchmark.get_data
+- retriever.retriever_init_chroma
+- retriever.retriever_search_chroma
+
