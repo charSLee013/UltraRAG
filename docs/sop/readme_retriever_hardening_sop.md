@@ -22,7 +22,6 @@
 
 已发现的遗留问题（需在本 SOP 解决）
 - 少量返回文本呈 JSON 转义/混杂页面字段，未完全规范化为 README 纯文本。
-- 约 1–2% 的条目缺少 `source_url/revision` 元数据，需离线可复现的补全方案。
 - 嵌入重试/回退参数固定，偶发网络问题时等待较长，需参数化以改善体验。
 - 自动化测试覆盖不足：别名一致性、元数据契约、错误分支尚未落 CI。
 
@@ -40,14 +39,9 @@
 - HTML→纯文本：使用最小清洗（去 `<script/style>` 与 HTML 标签，保留段落与标题换行），避免引入 Markdown 渲染差异。
 - 输出：`ret_psg` 为纯文本；在对应 `metadata[i][j]` 增加 `clean_state`（enum: json_decoded/html_stripped/raw）。
 
-2. 元数据补全（离线）
-- 目标：保证命中结果 >= 99% 拥有非空 `source_url` 与 `revision`。
-- 规则：
-  - 当 `repo_type=="model"`：`source_url=https://modelscope.cn/models/{owner}/{name}/summary`；
-  - 当 `repo_type=="dataset"`：`source_url=https://modelscope.cn/datasets/{owner}/{name}`；
-  - 缺失 `revision` 则填充 `"master"`；
-  - 仅对缺失字段进行就地补写（不改动文本与嵌入）。
-- 脚本：`script/backfill_modelscope_metadata.py`，扫描 `CHROMA_PATH` 与 `docs.sqlite`，生成变更统计与审计日志。
+2. 元数据最小化（契约）
+- 目标：检索返回仅保证 `repo_author` 与 `repo_name`，其他字段不属于合同范围。
+- 索引内是否存储 URL/Revision 不作强制要求；检索时不进行运行时兜底生成。
 
 3. 嵌入请求的重试/超时参数化
 - 在 `servers/retriever/src/retriever.py::_embed_remote` 暴露：
@@ -82,7 +76,7 @@
 - 命令：`ultrarag run examples/retriever_search_only.yaml`（需可用嵌入服务与已建索引）。
 - 期望：
   - 控制台/日志出现 `retriever.retriever_search_readme` 步骤；
-  - 生成 `output/memory_nq_retriever_search_only_*.json`，其中每条命中均含 `repo_type/owner/name/path/source_url/revision/score/clean_state`；
+  - 生成 `output/memory_nq_retriever_search_only_*.json`，其中每条命中均含 `repo_author/repo_name/score`（可选 `clean_state`）；
   - `ret_psg` 为可读文本（非 JSON 转义块）。
 
 一致性验证
@@ -90,7 +84,7 @@
 
 数据质量阈值
 - 随机抽样 100 条命中：
-  - `source_url/revision` 缺失率 ≤ 1%；
+  - `repo_author/repo_name` 非空覆盖率 ≥ 99%；
   - `clean_state=json_decoded/html_stripped` 的样本可读性通过人工 spot‑check（标题/段落结构合理）。
 
 健壮性
@@ -110,4 +104,3 @@
 - D+3：嵌入参数化 + 文档；
 - D+4：端到端验收（两条 YAML）+ 回归基线固化；
 - D+5：收尾（风险复盘、指标固化、SOP 归档）。
-

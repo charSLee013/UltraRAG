@@ -721,13 +721,8 @@ class Retriever:
                 meta = meta or {}
                 row.append(
                     {
-                        "repo_type": meta.get("repo_type"),
-                        "owner": meta.get("owner"),
-                        "name": meta.get("name"),
-                        "path": meta.get("path"),
-                        "chunk_index": meta.get("chunk_index"),
-                        "source_url": meta.get("source_url"),
-                        "revision": meta.get("revision"),
+                        "repo_author": meta.get("owner"),
+                        "repo_name": meta.get("name"),
                         "score": float(score) if score is not None else None,
                         "clean_state": clean_state,
                     }

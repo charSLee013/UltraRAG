@@ -11,7 +11,7 @@
 - 数据现状：README 向量索引位于 `output/modelscope_docs/chroma`；SQLite 仅含 `docs/chunks/repo_state` 三表，支持基于 `(repo_type, owner, name)` 的增量跳过。
 - 检索工具已就位：`retriever_init_readme` / `retriever_search_readme` 已在 `servers/retriever/src/retriever.py` 实现；旧名 `retriever_init_chroma` / `retriever_search_chroma` 作为别名直连新实现（向后兼容）。
 - YAML 已切换：`examples/rag.yaml`、`examples/search_o1.yaml` 使用 README 检索工具；Search‑o1 所需模板在 `servers/prompt/parameter.yaml` 中声明。
-- 编程风格：最小化 + fail-fast；不做防御式兜底、不保留备用分支、不输出噪声日志。
+- 编程风格：最小化 + fail-fast；不做运行时兜底生成冗余元数据。
 
 ## 环境变量与参数
 - 必需：`CHROMA_PATH`、`CHROMA_COLLECTION`（默认 `modelscope_docs`）、`EMBEDDING_API_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`（默认 `BAAI/bge-m3`）、`EMBEDDING_TIMEOUT`（秒，默认 60）。
@@ -20,12 +20,13 @@
 ## 规格（Spec）
 1. **工具设计**
    - 工具：`retriever_init_readme(chroma_path?, chroma_collection?, embedding_api_url?, embedding_api_key?, embedding_model?, embedding_timeout?)` 初始化 Chroma 与嵌入端点；`retriever_search_readme(query_list, top_k=5, query_instruction="")` 返回 README 段落+元数据。
-   - 返回结构：`{"ret_psg": [[...]], "metadata": [[{"repo_type","owner","name","path","source_url","revision","score"}, ...]]}`，用于下游渲染与溯源。
+   - 返回结构（最小合同）：`{"ret_psg": [[...]], "metadata": [[{"repo_author","repo_name","score"}, ...]]}`。
+   - 可选诊断字段：`clean_state` 用于标注清洗路径（`html_stripped/json_decoded/raw`）。不返回 `source_url/revision/path` 等非必需字段。
 2. **YAML 对接**
    - 更新 `examples/rag.yaml`、`search_o1.yaml` 等，使检索步骤调用新工具。
    - 若 Search-o1/S1 需要多轮检索，保持现有 loop 结构不变，仅替换底层检索工具。
 3. **配置**
-   - `.env`、`servers/retriever/parameter.yaml` 如需新增字段仅限于 README 检索必需项，不引入额外噪声。
+   - `.env`、`servers/retriever/parameter.yaml` 仅包含 README 检索必需项；不引入与溯源 URL 相关的生成逻辑或兜底参数。
    - AGENTS.md 需明确“检索 README 索引前提已建立”。
 
 ## 实施计划
@@ -40,6 +41,6 @@
    - 运行 Search-o1/S1 流程，验证多轮检索能落到 README 片段。
 
 ## 验证
-- README 工具返回的 metadata 包含 `repo_type/owner/name`，可用于后续引用/跳转。
-- pipeline 输出中引用的文本应来自 README；随机抽样验证链接指向 ModelScope README。
+- README 工具返回的 metadata 至少包含 `repo_author/repo_name`；内容与得分与查询一致。
+- pipeline 输出中引用的文本应来自 README；随机抽样检查可读性（无明显 JSON 转义/HTML 杂质）。
 - 大规模运行时性能不回退（受到 API 限速时表现与同步阶段一致）。
