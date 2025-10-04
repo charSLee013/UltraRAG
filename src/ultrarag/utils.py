@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import re as _re
 import html as _html
 import json as _json
+import codecs as _codecs
 
 IS_POSIX = os.name == "posix"
 IS_WINDOWS = os.name == "nt"
@@ -149,24 +150,60 @@ def normalize_readme_text(text: Optional[str]) -> Tuple[str, str]:
         try:
             obj = _json.loads(s_stripped)
         except Exception:
+            # Not a top-level JSON payload; keep going to unicode-unescape
+            pass
+        else:
+            decoded = True
+            if isinstance(obj, str):
+                s = obj
+                continue
+            if isinstance(obj, dict):
+                for key in ("ReadMeContent", "readme", "ReadmeContent", "content", "text"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val.strip():
+                        s = val
+                        break
+                else:
+                    # Fallback: stringify to avoid returning an opaque dict
+                    s = _json.dumps(obj, ensure_ascii=False)
+                break
+            # Non-dict/non-str payload: stop
             break
-
-        decoded = True
-        if isinstance(obj, str):
-            s = obj
-            continue
-        if isinstance(obj, dict):
-            for key in ("ReadMeContent", "readme", "ReadmeContent", "content", "text"):
-                val = obj.get(key)
-                if isinstance(val, str) and val.strip():
-                    s = val
+    # If we did not JSON-decode, try to extract embedded ReadMeContent value
+    # from a larger JSON-like blob without full JSON integrity.
+    if not decoded and "ReadMeContent" in s:
+        m = _re.search(r"ReadMeContent\"\s*:\s*\"", s)
+        if m:
+            start = m.end()
+            buf = []
+            esc = False
+            for ch in s[start:]:
+                if esc:
+                    buf.append(ch)
+                    esc = False
+                    continue
+                if ch == "\\":
+                    esc = True
+                    continue
+                if ch == '"':
                     break
-            else:
-                # Fallback: stringify to avoid returning an opaque dict
-                s = _json.dumps(obj, ensure_ascii=False)
-            break
-        # Non-dict/non-str payload: stop
-        break
+                buf.append(ch)
+            if buf:
+                s = "".join(buf)
+                decoded = True
+
+    # If we did not JSON-decode, try to interpret unicode escape sequences
+    # like "\u003c" that commonly appear in scraped payloads
+    if not decoded and ("\\u" in s or _re.search(r"\\x[0-9a-fA-F]{2}", s)):
+        for _ in range(2):
+            try:
+                s_new = _codecs.decode(s, "unicode_escape")
+            except Exception:
+                break
+            if s_new == s:
+                break
+            s = s_new
+            decoded = True
 
     if decoded:
         clean_state = "json_decoded"
