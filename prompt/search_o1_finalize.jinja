@@ -1,0 +1,24 @@
+你已经完成多轮搜索与整理，请基于当前对话/上下文，把 Qwen 家族模型信息汇总成最终答复。
+
+生成规则：
+1. 输出内容必须是 LaTeX 盒子形式：
+   \boxed{1. Qwen 核心 \newline \textbf{模型ID}（用途） …}
+2. 盒子中至少包含以下 10 个类别，并在类别下列出对应的真实型号：
+   - Qwen 核心：Qwen-0.5B、Qwen-1.8B、Qwen-7B、Qwen-14B、Qwen-72B。
+   - Qwen1.5 系列：Qwen1.5-1.8B、Qwen1.5-7B、Qwen1.5-14B、Qwen1.5-32B、Qwen1.5-72B。
+   - Qwen2 系列：Qwen2-7B、Qwen2-14B、Qwen2-72B。
+   - Qwen2.5 系列：Qwen2.5-7B、Qwen2.5-14B、Qwen2.5-32B、Qwen2.5-72B。
+   - 多模态：Qwen-VL、Qwen2-VL、Qwen2.5-VL、Qwen-Omni、Qwen2-Omni。
+   - 音频/视频：Qwen-Audio、Qwen2-Audio、Qwen-Video、Qwen2-Video。
+   - 代码：Qwen-Coder、Qwen1.5-Coder、Qwen2.5-Coder。
+   - 嵌入：Qwen-Embedding、Qwen2.5-Embedding。
+   - 数学：Qwen-Math、Qwen2.5-Math。
+   - 长上下文：Qwen-LongContext、Qwen2.5-LongContext。
+3. 盒子闭合后必须紧跟字面量 <|im_end|>（直接输出该标记），禁止追加额外文本，例如：\boxed{...}<|im_end|>。
+4. 禁止虚构模型名称或占位词，仅使用上列真实型号；可补充等效别名但需与公开型号对应。
+
+
+以下是你当前掌握的推理上下文：
+{{conversation}}
+
+请直接输出形如 \boxed{...}<|im_end|> 的结果（确保 <|im_end|> 紧随盒子之后）。

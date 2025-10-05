@@ -327,5 +327,19 @@ def search_o1_insert(
     return ret
 
 
+@app.prompt(output="prompt_ls,template->prompt_ls")
+def search_o1_finalize(
+    prompt_ls: List[PromptMessage],
+    template: str | Path,
+) -> List[PromptMessage]:
+    template_obj: Template = load_prompt_template(template)
+    ret: List[PromptMessage] = []
+    for prompt in prompt_ls:
+        conversation = prompt.content.text if hasattr(prompt.content, "text") else str(prompt)
+        rendered = template_obj.render(conversation=conversation)
+        ret.append(rendered)
+    return ret
+
+
 if __name__ == "__main__":
     app.run(transport="stdio")

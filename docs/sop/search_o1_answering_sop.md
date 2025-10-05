@@ -59,6 +59,12 @@
        - `prompt.search_o1_insert` → `generation.generate`
 5. 终止后（建议）：`custom.output_extract_from_boxed` 生成 `pred_ls`，用于 `evaluation.evaluate`。
 
+实现约束（Env‑First 与模板绑定）
+- Search‑o1 的两个提示模板在管线调用点显式指定，避免回落到通用 `qa_boxed`：
+  - `prompt.search_o1_init.input.template: prompt/search_o1_reasoning.jinja`
+  - `prompt.searcho1_reasoning_indocument.input.template: prompt/search_o1_refinement.jinja`
+  - 示例已在 `examples/search_o1.yaml` 固化上述输入覆写。
+
 ## 输入/输出契约（摘录）
 - 检索：`{"ret_psg": List[List[str]], "metadata": List[List[{repo_author, repo_name, score, clean_state?}]]}`
 - 生成：`{"ans_ls": List[str]}`；评测使用 `pred_ls`（从 `\boxed{...}` 抽取）。
@@ -66,9 +72,16 @@
 
 ## 质量验收清单（真实可运行）
 - 配置与准备：
-  - `.venv` 已激活；完成 `pip/uv install -e .`。
-  - `.env`/环境变量：已设置 `LLM_API_KEY/BASE_URL/MODEL_NAME`（生成），`CHROMA_PATH/CHROMA_COLLECTION/EMBEDDING_API_URL/EMBEDDING_API_KEY`（检索）。
-  - `servers/generation/parameter.yaml` 已按建议启用 `stop` 与 `include_stop_str_in_output`。
+  - `.venv` 已激活；依赖通过 `uv pip install -e .`（或 `pip install -e .`）装入，确保项目源码可被直接引用。
+  - 运行统一通过 Python 脚本调用 `ultrarag.client`（示例见下），无需使用 `ultrarag` CLI 命令。
+  - 环境变量优先（Env‑First）：生成端运行时总是优先读取环境变量，参数文件仅作兜底。
+    - Base URL（优先级）：`LLM_BASE_URL` → `OPENAI_BASE_URL` → `BASE_URL` → 参数 `generation.base_url`
+    - 模型名（优先级）：`LLM_MODEL_NAME` → `MODEL_NAME` → `LLM_MODEL` → 参数 `generation.model_name`
+    - 凭证：`LLM_API_KEY`（若参数未显式提供）
+    - 运行前必须导出：`export LLM_BASE_URL=... LLM_MODEL_NAME=... LLM_API_KEY=...`
+    - 连通性自检：`curl -s $LLM_BASE_URL/models | head -c 200`
+  - 检索端环境：`CHROMA_PATH/CHROMA_COLLECTION/EMBEDDING_API_URL/EMBEDDING_API_KEY` 保持必需。
+  - `servers/generation/parameter.yaml` 已按建议启用 `stop` 与 `include_stop_str_in_output`（examples 覆盖为准）。
 - 功能行为：
   - 首轮 `generation.generate` 能输出 `<|end_search_query|>` 或直接给出思考；
   - 路由器对含 `<|end_search_query|>` 的输出判定为 `retrieve`，对含 `<|im_end|>` 的输出判定为 `stop`；
@@ -83,6 +96,11 @@
   - 当 `top_k <= 0`、缺少必需 env 时，工具抛出清晰错误信息（fail‑fast）。
 - 性能（小规模验收）：
   - 每轮生成/检索在可接受延迟内完成；`stop` 截断能显著减少无效生成。
+
+ - 环境优先与连通性：
+   - 未设置 `LLM_BASE_URL/LLM_MODEL_NAME/LLM_API_KEY` 时应立即 fail‑fast，并给出明确缺失项；
+   - 日志包含“env‑first”来源说明（base_url 打 `***`，model_name 明文），确认确实读取到环境变量；
+   - `curl $LLM_BASE_URL/models` 返回 200 或供应商等价健康检查通过。
 
 ## 观测与排障
 - 查看最新内存快照：`output/memory_*search_o1*<ts>.json`
@@ -103,11 +121,56 @@
 
 ## 验收操作示例
 - 生成 server/parameter（如首次或参数变更）：
-  - `ultrarag build examples/search_o1.yaml`
+  - `python script/run_search_o1.py build examples/search_o1.yaml`
 - 真实运行（需联网与可用模型）：
-  - `ultrarag run examples/search_o1.yaml`
-- 可选：若使用 `pred_ls` 评测，在管线中插入 `custom.output_extract_from_boxed` 后再运行。
+  - `python script/run_search_o1.py run examples/search_o1.yaml`
+- 可选：若使用 `pred_ls` 评测，在管线中插入 `custom.output_extract_from_boxed` 后再运行（脚本会读取更新后的 YAML）。
+
+环境优先快速排错：
+- 无本地 vLLM 时不要使用 `http://localhost:8000/v1`；必须设置远程 `LLM_BASE_URL` 并与 `LLM_MODEL_NAME/LLM_API_KEY` 匹配。
+- 若需本地服务，可在 `generation.generate` 前插入 `generation.initialize_local_vllm`，但默认路径为远程 Env‑First，不强制本地部署。
+
+### 运行脚本示例
+
+使用以下样例脚本（建议保存在 `script/run_search_o1.py`），即可在不安装包的情况下完成构建与运行：
+
+```python
+#!/usr/bin/env python
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from ultrarag.client import build, run  # noqa: E402
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["build", "run"], help="pipeline op")
+    parser.add_argument("pipeline", help="path to YAML pipeline")
+    args = parser.parse_args()
+
+    if args.action == "build":
+        await build(args.pipeline)
+    else:
+        await run(args.pipeline)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+运行时可指定不同 YAML（脚本会自动确保 `src/` 在解释器路径中）：
+
+```bash
+python script/run_search_o1.py build examples/search_o1.yaml
+python script/run_search_o1.py run examples/search_o1.yaml
+```
 
 ---
 注：本 SOP 遵循“Specification‑First”。任何实现改动（例如默认启用 `stop`/抽取步骤变更）须先更新本文档再进行编码与提交。
-

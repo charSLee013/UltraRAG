@@ -695,7 +695,17 @@ class Retriever:
         if top_k <= 0:
             raise ValueError("top_k must be a positive integer")
 
-        queries = [f"{query_instruction}{query}" for query in query_list]
+        filtered_queries = [
+            query.strip()
+            for query in query_list
+            if isinstance(query, str) and query.strip()
+        ]
+
+        if not filtered_queries:
+            empty = [[] for _ in query_list]
+            return {"ret_psg": empty, "metadata": empty}
+
+        queries = [f"{query_instruction}{query}" for query in filtered_queries]
         embeddings = await self._embed_remote(queries)
 
         results = self.chroma_collection.query(
@@ -704,9 +714,9 @@ class Retriever:
             include=["documents", "metadatas", "distances"],
         )
 
-        documents = results.get("documents") or [[] for _ in query_list]
-        metadatas = results.get("metadatas") or [[] for _ in query_list]
-        distances = results.get("distances") or [[] for _ in query_list]
+        documents = results.get("documents") or [[] for _ in filtered_queries]
+        metadatas = results.get("metadatas") or [[] for _ in filtered_queries]
+        distances = results.get("distances") or [[] for _ in filtered_queries]
 
         ret_psg: List[List[str]] = []
         metadata_rows: List[List[Dict[str, Any]]] = []

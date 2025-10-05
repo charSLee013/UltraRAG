@@ -15,6 +15,36 @@ Author tests with `pytest`; place them in `tests/` mirroring the package path (`
 
 ## Retrieval Data Sources
 README ingestion writes to `output/modelscope_docs/chroma`; retriever pipelines must use `retriever_init_readme` / `retriever_search_readme`, which return README segments plus minimal metadata (`repo_author/repo_name`, with `score`; optional `clean_state`).
+
+## Search‑o1 Retrieval Neutrality & Anti‑Patterns
+To keep Search‑o1 flows neutral, reproducible, and auditable, follow these rules:
+
+- Neutral retrieval (must):
+  - Do not inject brand/org names, model families, or expected answer lists into `retriever.query_instruction` to steer results.
+  - Do not maintain allow/deny lists (e.g., by `repo_author`/`repo_name`) or perform domain‑specific gating at the retriever or router layer.
+  - Keep the minimal contract: return only `ret_psg` text plus minimal `metadata` (author/name/score/clean_state) — no task‑specific fields.
+
+- Clear responsibility boundaries (must):
+  - Retriever → recall + text cleaning only (no semantic filtering by brand/source).
+  - Prompt/Generation → integrate evidence, structure and deduplicate facts, and produce a final boxed answer (`\boxed{...}`).
+  - Router/Loop → decide `retrieve` vs `stop` via explicit markers (`<|end_search_query|>`, `<|im_end|>`); loop `times` is an upper bound.
+
+- Prohibited patterns (do not):
+  - Injecting terms like “Qwen/Qwen2/Qwen3 系列模型列表” or similar domain hints into retriever instructions.
+  - Whitelisting or blacklisting sources (e.g., `repo_author == 'Qwen'`).
+  - Hard‑coding domain knowledge or heuristics into server code/parameters that bias retrieval outcomes.
+
+- Allowed safe tuning (okay):
+  - Adjust generic hyper‑parameters (e.g., `top_k`, temperature, `max_tokens`, loop `times`).
+  - Improve prompts to request structured, deduplicated lists and to emit `<|im_end|>` once sufficient evidence is gathered.
+  - Evidence‑based deduplication/merging in refinement (on content agreement), never deletion based on source identity.
+
+- Observability & reproducibility (must):
+  - Preserve `memory_*` snapshots (prompts, answers, `ret_psg`, `metadata`) for each step; avoid hidden filters.
+  - Keep logs informative without leaking secrets; never mask or strip source provenance in diagnostic output.
+
+- Specification‑First (must):
+  - Any behavioral change to retrieval/loop/termination must be updated in `docs/sop/search_o1_answering_sop.md` before implementation.
 ## Specification-First Development
 Every feature or significant change must have an SOP entry under `docs/sop/` before coding begins. Treat the SOP as the single source of truth: update the spec and implementation plan first, then implement code and other artifacts strictly following the SOP. If requirements change, revise the SOP prior to any code edits.
 

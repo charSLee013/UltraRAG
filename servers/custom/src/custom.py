@@ -21,7 +21,7 @@ def search_r1_query_extract(ans_ls: List[str]) -> Dict[str, List[str]]:
                 query += "?"
             return query
         else:
-            return "There is no query."
+            return ""
 
     query = [get_query(answer) for answer in ans_ls]
 
@@ -143,6 +143,19 @@ def search_o1_query_extract(ans_ls: List[str]) -> Dict[str, List[str]]:
     query = [get_query(answer) for answer in ans_ls]
 
     return {"extract_query_list": query}
+
+
+@app.tool(output="ans_ls->ans_ls")
+def search_o1_ensure_stop(ans_ls: List[str]) -> Dict[str, List[str]]:
+    updated: List[str] = []
+    for ans in ans_ls:
+        if "<|im_end|>" in ans:
+            updated.append(ans)
+            continue
+        trimmed = ans.rstrip()
+        cleaned = re.sub(r"(停止标记|停止)\s*$", "", trimmed)
+        updated.append(f"{cleaned}<|im_end|>")
+    return {"ans_ls": updated}
 
 
 if __name__ == "__main__":

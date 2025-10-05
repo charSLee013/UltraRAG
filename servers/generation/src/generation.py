@@ -93,8 +93,8 @@ def initialize_local_vllm(
 @app.tool(output="prompt_ls,model_name,base_url,sampling_params,api_key->ans_ls")
 async def generate(
     prompt_ls: List[Union[str, Dict[str, Any]]],
-    model_name: str,
-    base_url: str,
+    model_name: str | None,
+    base_url: str | None,
     sampling_params: Dict[str, Any],
     api_key: str = "EMPTY",
 ) -> Dict[str, List[str]]:
@@ -105,7 +105,45 @@ async def generate(
         else os.environ.get("LLM_API_KEY", "EMPTY")
     )
 
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    sampling_params = dict(sampling_params)
+    request_timeout = sampling_params.pop("timeout", None)
+
+    # Env-first precedence: prefer environment variables over parameters
+    resolved_base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("BASE_URL")
+        or base_url
+    )
+    if not resolved_base_url:
+        raise ToolError(
+            "LLM base URL not provided; set via env (LLM_BASE_URL/OPENAI_BASE_URL/BASE_URL) or parameter"
+        )
+
+    resolved_model = (
+        os.environ.get("LLM_MODEL_NAME")
+        or os.environ.get("MODEL_NAME")
+        or os.environ.get("LLM_MODEL")
+        or model_name
+    )
+    if not resolved_model:
+        raise ToolError(
+            "LLM model name not provided; set via env (LLM_MODEL_NAME/MODEL_NAME/LLM_MODEL) or parameter"
+        )
+
+    app.logger.info(
+        f"[generation] Using base_url=***; model_name={resolved_model} (env-first)."
+    )
+
+    if request_timeout:
+        app.logger.warning(
+            f"[generation] Request timeout configured to {request_timeout} seconds."
+        )
+    client = AsyncOpenAI(
+        base_url=resolved_base_url,
+        api_key=api_key,
+        timeout=request_timeout,
+    )
 
     prompts = []
     for m in prompt_ls:
@@ -126,7 +164,7 @@ async def generate(
             for attempt in range(retries):
                 try:
                     resp = await client.chat.completions.create(
-                        model=model_name,
+                        model=resolved_model,
                         messages=msg,
                         **sampling_params,
                     )
@@ -158,8 +196,8 @@ async def generate(
 )
 async def multimodal_generate(
     prompt_ls: List[Union[str, Dict[str, Any]]],
-    model_name: str,
-    base_url: str,
+    model_name: str | None,
+    base_url: str | None,
     sampling_params: Dict[str, Any],
     ret_path: List[List[str]],
     api_key: str = "EMPTY",
@@ -171,7 +209,34 @@ async def multimodal_generate(
         else os.environ.get("LLM_API_KEY", "EMPTY")
     )
 
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    # Env-first precedence: prefer environment variables over parameters
+    resolved_base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("BASE_URL")
+        or base_url
+    )
+    if not resolved_base_url:
+        raise ToolError(
+            "LLM base URL not provided; set via env (LLM_BASE_URL/OPENAI_BASE_URL/BASE_URL) or parameter"
+        )
+
+    resolved_model = (
+        os.environ.get("LLM_MODEL_NAME")
+        or os.environ.get("MODEL_NAME")
+        or os.environ.get("LLM_MODEL")
+        or model_name
+    )
+    if not resolved_model:
+        raise ToolError(
+            "LLM model name not provided; set via env (LLM_MODEL_NAME/MODEL_NAME/LLM_MODEL) or parameter"
+        )
+
+    app.logger.info(
+        f"[generation] Using base_url=***; model_name={resolved_model} (env-first)."
+    )
+
+    client = AsyncOpenAI(base_url=resolved_base_url, api_key=api_key)
 
     prompts = []
     for m in prompt_ls:
@@ -220,7 +285,7 @@ async def multimodal_generate(
             for attempt in range(retries):
                 try:
                     resp = await client.chat.completions.create(
-                        model=model_name,
+                        model=resolved_model,
                         messages=msg,
                         **sampling_params,
                     )

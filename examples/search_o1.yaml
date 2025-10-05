@@ -15,12 +15,14 @@ pipeline:
 - benchmark.get_data
 - retriever.retriever_init_readme
 # 2. 初始化 (构造 instruction + 问题)
-- prompt.search_o1_init
+- prompt.search_o1_init:
+    input:
+      template: $search_o1_init_template
 # 3. 首轮初始生成 (得到初始 reasoning / 可能的第一个 <SEARCH_QUERY>)
 - generation.generate
 # 4. 循环：多轮搜索 + 推理
 - loop:
-    times: 3
+    times: 2
     steps:
     - branch:
         router:
@@ -34,14 +36,22 @@ pipeline:
               input:
                 query_list: extract_query_list
           # 4.4 reasoning_indocument
-          - prompt.searcho1_reasoning_indocument
+          - prompt.searcho1_reasoning_indocument:
+              input:
+                template: $search_o1_refinement_template
           - generation.generate
           # 4.5 追加 <BEGIN_SEARCH_RESULT> …）
           - prompt.search_o1_insert
           # 4.6 生成新一轮 reasoning / 可能新的查询
           - generation.generate
           stop: []
-# 5. 评估 (使用最终答案 / reasoning)
+# 5. 抽取盒装答案并评估
+- prompt.search_o1_finalize:
+    input:
+      template: $search_o1_finalize_template
+- generation.generate
+- custom.search_o1_ensure_stop
+- custom.output_extract_from_boxed
 - evaluation.evaluate:
     input:
-      pred_ls: ans_ls
+      pred_ls: pred_ls
