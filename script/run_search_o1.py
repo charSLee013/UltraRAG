@@ -14,7 +14,6 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -23,6 +22,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+
+# Ensure subprocess (FastMCP servers) can import local package
+existing_pythonpath = os.environ.get("PYTHONPATH")
+os.environ["PYTHONPATH"] = (
+    f"{SRC_ROOT}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(SRC_ROOT)
+)
 
 # Prefer local venv if present (quality‑of‑life only; not required)
 venv_bin = PROJECT_ROOT / ".venv" / "bin"
@@ -33,17 +38,18 @@ if venv_bin.exists():
 from ultrarag.mcp_logging import get_logger  # noqa: E402
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Search‑o1 via Python API")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run Search‑o1 via Python API (SOP smoke run)")
+    parser.add_argument(
+        "question",
+        nargs="?",
+        default="请列出 Qwen 系列公开发布的模型，并按类别简要说明。",
+        help="question to run (default: SOP 场景A)",
+    )
     parser.add_argument(
         "--config",
         default="pipelines/search_o1/run.yaml",
         help="path to Search‑o1 run.yaml (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--question",
-        required=True,
-        help="question to run through the pipeline",
     )
     args = parser.parse_args()
 
@@ -52,9 +58,11 @@ async def main() -> None:
 
     from ultrarag.api import SearchO1Pipeline  # noqa: E402
 
+    q = (args.question or "").strip()
+
     try:
         pipeline = SearchO1Pipeline(args.config)
-        result = pipeline.query(args.question)
+        result = pipeline.query(q)
     except Exception as e:  # surface env‑first or runtime errors cleanly
         print(f"[SearchO1] error: {e}", file=sys.stderr)
         raise SystemExit(2)
@@ -63,5 +71,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    main()

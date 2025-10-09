@@ -135,15 +135,24 @@ async def generate(
         f"[generation] Using base_url=***; model_name={resolved_model} (env-first)."
     )
 
-    if request_timeout:
-        app.logger.warning(
-            f"[generation] Request timeout configured to {request_timeout} seconds."
-        )
     client = AsyncOpenAI(
         base_url=resolved_base_url,
         api_key=api_key,
         timeout=request_timeout,
     )
+
+    def _debug_enabled() -> bool:
+        v = os.getenv("SEARCH_O1_DEBUG")
+        return v not in (None, "0", "false", "False")
+
+    _timeout_notified = getattr(app, "_timeout_notified", False)
+    if request_timeout and not _timeout_notified:
+        level = app.logger.info if not _debug_enabled() else app.logger.debug  # type: ignore[attr-defined]
+        level(
+            "[generation] timeout configured to %s seconds.",
+            request_timeout,
+        )
+        setattr(app, "_timeout_notified", True)
 
     prompts = []
     for m in prompt_ls:
@@ -158,6 +167,19 @@ async def generate(
 
     sem = asyncio.Semaphore(8)
 
+    if _debug_enabled():
+        stop_list = (
+            (sampling_params.get("extra_body") or {}).get("stop")
+            if isinstance(sampling_params.get("extra_body"), dict)
+            else None
+        )
+        app.logger.info(
+            "[generation] debug: model=%s base_url=*** stop=%s max_tokens=%s",
+            resolved_model,
+            stop_list,
+            sampling_params.get("max_tokens"),
+        )
+
     async def call_with_retry(idx: int, prompt: str, retries=3, delay=1):
         msg = [{"role": "user", "content": prompt}]
         async with sem:
@@ -168,7 +190,27 @@ async def generate(
                         messages=msg,
                         **sampling_params,
                     )
-                    return idx, resp.choices[0].message.content
+                    content = resp.choices[0].message.content
+                    if _debug_enabled():
+                        try:
+                            app.logger.info("[generation] debug: raw=%s", resp.model_dump_json())
+                        except Exception:
+                            app.logger.info("[generation] debug: raw=%s", resp)
+                    if _debug_enabled():
+                        finish = getattr(resp.choices[0], "finish_reason", None)
+                        usage = getattr(resp, "usage", None)
+                        try:
+                            usage_dump = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                        except Exception:
+                            usage_dump = str(usage)
+                        app.logger.info(
+                            "[generation] debug: idx=%s finish=%s len=%s usage=%s",
+                            idx,
+                            finish,
+                            len(content or ""),
+                            usage_dump,
+                        )
+                    return idx, content
                 except AuthenticationError as e:
                     raise ToolError(
                         f"Unauthorized (401): Access denied at {base_url}."
@@ -238,6 +280,10 @@ async def multimodal_generate(
 
     client = AsyncOpenAI(base_url=resolved_base_url, api_key=api_key)
 
+    def _debug_enabled() -> bool:
+        v = os.getenv("SEARCH_O1_DEBUG")
+        return v not in (None, "0", "false", "False")
+
     prompts = []
     for m in prompt_ls:
         if hasattr(m, "content") and hasattr(m.content, "text"):
@@ -289,7 +335,27 @@ async def multimodal_generate(
                         messages=msg,
                         **sampling_params,
                     )
-                    return idx, resp.choices[0].message.content
+                    text = resp.choices[0].message.content
+                    if _debug_enabled():
+                        try:
+                            app.logger.info("[generation] debug: raw=%s", resp.model_dump_json())
+                        except Exception:
+                            app.logger.info("[generation] debug: raw=%s", resp)
+                    if _debug_enabled():
+                        finish = getattr(resp.choices[0], "finish_reason", None)
+                        usage = getattr(resp, "usage", None)
+                        try:
+                            usage_dump = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                        except Exception:
+                            usage_dump = str(usage)
+                        app.logger.info(
+                            "[generation] debug: idx=%s finish=%s len=%s usage=%s",
+                            idx,
+                            finish,
+                            len(text or ""),
+                            usage_dump,
+                        )
+                    return idx, text
                 except AuthenticationError as e:
                     raise ToolError(
                         f"Unauthorized (401): Access denied at {base_url}."

@@ -1,7 +1,7 @@
 import os
 import string
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 from jinja2 import Template
 
@@ -274,33 +274,49 @@ def r1_searcher_gen(
         ret.append(p)
     return ret
 
+def _normalize_contract(token_contract: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if not token_contract:
+        return {}
+    return {
+        key: value
+        for key, value in token_contract.items()
+        if isinstance(value, str)
+    }
 
-# prompt for search-o1
-@app.prompt(output="q_ls,template->prompt_ls")
+
+@app.prompt(output="q_ls,template,token_contract->prompt_ls")
 def search_o1_init(
     q_ls: List[str],
     template: str | Path,
+    goal_description: str | None = None,
+    token_contract: Optional[Dict[str, Any]] = None,
 ) -> List[PromptMessage]:
     template: Template = load_prompt_template(template)
-    # bad implementation
-    MAX_SEARCH_LIMIT = 10
+    contract = _normalize_contract(token_contract)
     ret = []
     for q in q_ls:
-        p = template.render(question=q, MAX_SEARCH_LIMIT=MAX_SEARCH_LIMIT)
+        p = template.render(
+            question=q,
+            goal_description=goal_description,
+            token_contract=contract,
+        )
         ret.append(p)
     return ret
 
 
 @app.prompt(
-    output="prompt_ls,extract_query_list,ret_psg,template->prompt_ls"
+    output="prompt_ls,extract_query_list,ret_psg,template,token_contract->prompt_ls"
 )
 def searcho1_reasoning_indocument(
     prompt_ls: List[PromptMessage],
     extract_query_list: List[str],
     ret_psg: List[str | Any],
     template: str | Path,
+    goal_description: str | None = None,
+    token_contract: Optional[Dict[str, Any]] = None,
 ) -> List[PromptMessage]:
     template: Template = load_prompt_template(template)
+    contract = _normalize_contract(token_contract)
     ret = []
     for prompt, squery, psg in zip(prompt_ls, extract_query_list, ret_psg):
 
@@ -308,35 +324,50 @@ def searcho1_reasoning_indocument(
         passage_text = "\n".join(passages)
         _pro = prompt.content.text
         p = template.render(
-            prev_reasoning=_pro, search_query=squery, document=passage_text
+            prev_reasoning=_pro,
+            search_query=squery,
+            document=passage_text,
+            goal_description=goal_description,
+            token_contract=contract,
         )
         ret.append(p)
     return ret
 
 
-@app.prompt(output="prompt_ls,ans_ls->prompt_ls")
+@app.prompt(output="prompt_ls,ans_ls,token_contract->prompt_ls")
 def search_o1_insert(
     prompt_ls: List[PromptMessage],
     ans_ls: List[str],
+    token_contract: Optional[Dict[str, Any]] = None,
 ) -> List[PromptMessage]:
+    contract = _normalize_contract(token_contract)
+    begin_result = contract.get("begin_result", "")
+    end_result = contract.get("end_result", "")
     ret = []
     for prompt, ans in zip(prompt_ls, ans_ls):
         _pro = prompt.content.text
-        p = _pro + "<|begin_search_result|>" + ans + "<|end_search_result|>"
+        p = _pro + begin_result + ans + end_result
         ret.append(p)
     return ret
 
 
-@app.prompt(output="prompt_ls,template->prompt_ls")
+@app.prompt(output="prompt_ls,template,token_contract->prompt_ls")
 def search_o1_finalize(
     prompt_ls: List[PromptMessage],
     template: str | Path,
+    goal_description: str | None = None,
+    token_contract: Optional[Dict[str, Any]] = None,
 ) -> List[PromptMessage]:
     template_obj: Template = load_prompt_template(template)
+    contract = _normalize_contract(token_contract)
     ret: List[PromptMessage] = []
     for prompt in prompt_ls:
         conversation = prompt.content.text if hasattr(prompt.content, "text") else str(prompt)
-        rendered = template_obj.render(conversation=conversation)
+        rendered = template_obj.render(
+            conversation=conversation,
+            goal_description=goal_description,
+            token_contract=contract,
+        )
         ret.append(rendered)
     return ret
 
