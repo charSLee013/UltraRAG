@@ -18,4 +18,4 @@ sampling_params:
     chat_template_kwargs:
       enable_thinking: false # as qwen3, switch to true if you want to enable thinking
     include_stop_str_in_output: true
-    stop: ["<|im_end|>", "<|end_search_query|>"]
+    stop: []

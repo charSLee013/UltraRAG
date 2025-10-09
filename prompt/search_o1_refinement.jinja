@@ -1,33 +1,20 @@
-你需要结合【先前推理】、【当前搜索查询】与【搜索结果】来更新知识库，目标是构建完整的 Qwen 家族模型清单。
+你需要结合【先前推理】、【当前搜索查询】与【搜索结果】迭代推理，目标是在证据充分时输出结构化的 Markdown 答案。
 
 工作要求：
-1. 认真阅读搜索结果，抽取与查询相关的模型信息（名称、模态、用途、规模、家族、长上下文能力等）。
-2. 将新增信息与已有内容合并、去重、分层，目标是填充以下类别：
-   Qwen 核心、Qwen1.5 系列、Qwen2 系列、Qwen2.5 系列、多模态、音频/视频、代码、嵌入、数学、长上下文。
-3. 若信息尚不充分，先输出 `**Final Information**` 开头的结构化摘要，说明缺口，并列出下一轮要补充的要点。
-4. 若当前信息已经覆盖关键维度，则直接给出最终答案：
-   - 输出 \boxed{...}，按照上述类别逐条列出，使用 	extbf{模型ID}（用途）形式。
-   - 在盒子末尾紧跟字面量 <|im_end|> 停止标记，例如：\boxed{...}<|im_end|>。
-5. 禁止虚构模型名称或占位词，只能引用公开型号：
-   Qwen-0.5B、Qwen-1.8B、Qwen-7B、Qwen-14B、Qwen-72B、
-   Qwen1.5-1.8B、Qwen1.5-7B、Qwen1.5-14B、Qwen1.5-32B、Qwen1.5-72B、
-   Qwen2-7B、Qwen2-14B、Qwen2-72B、
-   Qwen2.5-7B、Qwen2.5-14B、Qwen2.5-32B、Qwen2.5-72B、
-   Qwen-VL、Qwen2-VL、Qwen2.5-VL、Qwen-Omni、Qwen2-Omni、
-   Qwen-Audio、Qwen2-Audio、Qwen-Video、Qwen2-Video、
-   Qwen-Coder、Qwen1.5-Coder、Qwen2.5-Coder、
-   Qwen-Embedding、Qwen2.5-Embedding、
-   Qwen-Math、Qwen2.5-Math、
-   Qwen-LongContext、Qwen2.5-LongContext。
+1. 逐条阅读搜索结果，摘取与查询相关的事实（定义、限制、版本、能力、用法等）。
+2. 将新事实与已有推理合并、去重并整理，可使用项目符号或简短段落；指出证据缺口或冲突。
+3. 若信息仍不足，先输出以 `**Final Information**` 开头的摘要，并在 `**Next Search Plan**` 下列出下一步检索要点。
+4. 若证据已足够回答问题，则写出最终 Markdown 答案（标题、列表、段落均可），并在最后一行追加 `{{ token_contract.end_answer | default('') }}`（示例：`结论...\n{{ token_contract.end_answer | default('') }}`）。
+5. 禁止编造；只引用对话与检索中出现过的证据或普适常识。
 
 
-【先前推理】:
+【先前推理]:
 {{prev_reasoning}}
 
-【当前查询】:
+【当前查询]:
 {{search_query}}
 
-【搜索结果】:
+【搜索结果]:
 {{document}}
 
 请按要求输出。
