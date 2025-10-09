@@ -7,11 +7,11 @@
 | 领域 | 当前成果 | 对应 SOP / 文档 |
 | --- | --- | --- |
 | README 语料抓取 | `script/modelscope_docs_sync.py` 定期同步 ModelScope README 至 `output/modelscope_docs/chroma`，支撑 Env-first 检索。 | `docs/sop/readme_retriever_hardening_sop.md` |
-| 检索-推理闭环 | `examples/search_o1.yaml` 将 `retriever.retriever_init_readme → search_o1_init → router.search_o1_check` 组合成“检索→插入→再推理”循环，loop 上限 2。 | `docs/sop/search_o1_answering_sop.md` |
-| 模板与停词固化 | `prompt/search_o1_reasoning/refinement/finalize.jinja` 统一约束输出 `\boxed{...}<|im_end|>`；`servers/generation/parameter.yaml` & `examples/parameter/search_o1_parameter.yaml` 固定停词、Env-first 参数。 | `docs/sop/search_o1_answering_sop.md` |
-| 自定义工具链 | `custom.search_o1_query_extract`、`custom.search_o1_ensure_stop`、`custom.output_extract_from_boxed` 实现查询抽取、停词补写、boxed 抽取。 | `docs/sop/search_o1_answering_sop.md` |
-| 运行脚本 | `script/run_search_o1.py` 支持 `.venv` 下的 `build/run`，无需可执行安装。 | `docs/sop/search_o1_answering_sop.md` |
-| 验证与日志 | Search-o1 pipeline 已在 `output/memory_manual_qwen_models_search_o1_*.json` 产出自动化清单；日志记录 finalize → generate → ensure_stop → extract → evaluate；Env-first 单测覆盖 (`tests/servers/test_generation_env_first.py`)。 | `docs/sop/search_o1_answering_sop.md` |
+| 检索-推理闭环 | 通过 Python API 以 Search‑o1 范式执行（init→loop→finalize），loop 次数由参数注入；不依赖 CLI/脚本。 | `docs/sop/search_o1_answering_sop.md` |
+| 模板与停词固化 | 使用通用模板（reasoning/refinement/finalize）与最小停词；输出协议收敛为 Markdown，由 `custom.output_passthrough` 透传。 | `docs/sop/search_o1_answering_sop.md` |
+| 自定义工具链 | `custom.search_o1_query_extract`（读 TokenContract）、`router.search_o1_check`（读 TokenContract）、`custom.output_passthrough`（去停词并透传 Markdown）。 | `docs/sop/search_o1_answering_sop.md` |
+| 运行脚本 | 仅支持 Python API（`from ultrarag.api import SearchO1Pipeline`）。 | `docs/sop/search_o1_answering_sop.md` |
+| 验证与日志 | Search‑o1 pipeline 可在 `SEARCH_O1_DEBUG=1` 下写入 memory 快照；日志记录 router 判定与循环耗时；Env‑first 单测覆盖 (`tests/servers/test_generation_env_first.py`)。 | `docs/sop/search_o1_answering_sop.md` |
 
 ## 待补齐的问题（尚无 SOP 或需扩展）
 | 未完成项 | 原始需求缺口 | 下一步动作 |
@@ -21,20 +21,19 @@
 | 多模态 & 论坛数据 | 要求涵盖代码、图片、社区问答；目前仅 README 文本。 | 编写 `docs/sop/community_corpus_ingestion.md`（新）规划 Issue/论坛/多模态采集、向量化。 |
 | Reranker & 性能预算 | 未验证 3s/10s SLA，缺少 rerank & 缓存策略。 | 更新 generation/检索 SOP，添加性能测试、SiliconFlow reranker 接口。 |
 | 结构化 API 输出 | 目标是“Query → Answer → 中间证据”结构；现依赖磁盘 JSON。 | 在 Search-o1 SOP 内新增 `RunTrace` 设计，返回内存结构并保留可选磁盘落盘。 |
+| README 语料清洗 | 当前向量库仍混入 HTML/JSON 残片，检索证据不可直接引用。 | 制定 `docs/sop/readme_ingestion_cleaning.md`（新），增强 `script/modelscope_docs_sync.py` 的清洗、分段与验收指标。 |
 
-## 当前流程快照（2025-10-05）
+## 当前流程快照（2025-10-07）
 ```
 [数据同步]
   script/modelscope_docs_sync.py ──> output/modelscope_docs/chroma
                                        │
 [Search-o1 Pipeline]
-  benchmark.get_data
-       │
   retriever.retriever_init_readme
        │
   prompt.search_o1_init → generation.generate
        │
-  loop (max 2)
+  loop (max N via parameter)
     ├─ router.search_o1_check
     ├─ custom.search_o1_query_extract
     ├─ retriever.retriever_search_readme
@@ -43,12 +42,10 @@
        │
   prompt.search_o1_finalize → generation.generate
        │
-  custom.search_o1_ensure_stop → custom.output_extract_from_boxed
-       │
-  evaluation.evaluate ──> output/evaluate_results_*.json
+  custom.output_passthrough（去停词并返回 Markdown 文本）
 
-当前完成节点：数据同步、检索闭环、Qwen 清单输出。
-待开发节点：对话记忆、证据引用、多模态采集、性能评测、诊断工具、结构化 API。
+当前完成节点：数据同步、检索闭环、通用模板与 Python API 调用路径。
+待开发节点：对话记忆、引证结构、多模态采集、性能评测、诊断工具。
 ```
 
 ## 迭代原则
@@ -60,7 +57,7 @@
 ## 原始驱动力（Why we built this）
 - 可观测、可审计、可复现：每一步的输入/输出、路由与标记必须可回放与核验（memory_* 快照 + 日志），让复杂的 Search‑o1 流水线在竞赛/评测中可追踪、可对比。
 - 最小契约与中立检索：召回只返回 `ret_psg` 与最小 `metadata`，不注入品牌/白名单；结构化与去重在生成侧完成。
-- 组合式流程与低门槛：用 YAML 声明串行/循环/分支；CLI 一键跑通；模板明确“什么时候检索/什么时候终止/如何给出可评测的最终答案”。
+- 组合式流程与低门槛：用 YAML 声明串行/循环/分支；通过 Python API 调用（单一入口）；模板明确“什么时候检索/什么时候终止/如何给出可评测的最终答案”。
 - 端到端交付：既支持数据集批跑，也能“传入一个问题 → 自动产出结构化答案”，并暴露必要的中间状态用于验收。
 
 ## 已完成工作（What we have）与对应 SOP
@@ -68,17 +65,17 @@
   - 说明：`LLM_BASE_URL/LLM_MODEL_NAME/LLM_API_KEY` 优先，缺失 fail‑fast；示例参数不再写死本地端口。
   - 代码：servers/generation/src/generation.py（env‑first precedence）。
   - SOP：docs/sop/search_o1_answering_sop.md（“环境变量优先”条目与连通性自检）。
-- 最小检索契约与清洗
-  - 说明：README 检索返回 `ret_psg` + `metadata{repo_author, repo_name, score, clean_state}`；文本经 normalize 清洗。
+- 最小检索契约（清洗待加强）
+  - 说明：检索仅返回 `ret_psg` + `metadata{repo_author, repo_name, score, clean_state}`；当前 normalize 流程已上线，但仍需后续增强以移除 HTML/JSON 残片（见“README 语料清洗”待办）。
   - 代码：servers/retriever/src/retriever.py；src/ultrarag/utils.py。
   - SOP：docs/sop/README_Retriever_SOP.md、docs/sop/search_o1_answering_sop.md。
-- Search‑o1 模板与“必出盒装”收官链
-  - 说明：init/refinement/finalize 三模板；Finalize → 生成 → ensure_stop（若缺 `<|im_end|>` 补齐）→ 盒装抽取 → 评测。
-  - 代码：prompt/search_o1_*.jinja；servers/prompt/src/prompt.py（search_o1_finalize）；servers/custom/src/custom.py（search_o1_ensure_stop）；examples/search_o1.yaml（收官链）。
-  - SOP：docs/sop/search_o1_answering_sop.md（已记录 finalize/收官的实现与验收要点）。
+- Search‑o1 通用模板与 Markdown 收官
+  - 说明：init/refinement/finalize 三模板；Finalize → generate → output_passthrough（剥离停词并透传 Markdown）。
+  - 代码：prompt/search_o1_*.jinja；servers/prompt/src/prompt.py（search_o1_finalize）；servers/custom/src/custom.py（output_passthrough）。
+  - SOP：docs/sop/search_o1_answering_sop.md（已记录执行与验收要点）。
 - 观测与验收制品
-  - 说明：运行日志与 memory_* 快照（含 `<|begin_search_query|>` / `<|begin_search_result|>` / `<|im_end|>`），评测 JSON 固化结果；用于回放与审计。
-  - 代码：src/ultrarag/client.py（snapshots 与落盘）；servers/evaluation/src/evaluation.py。
+  - 说明：运行日志与 memory_* 快照（含 `<<SRCH_Q_BEGIN>>` / `<<SRCH_R_BEGIN>>` / `<<FINAL_ANSWER_END>>`）；是否写盘由开关控制。
+  - 代码：src/ultrarag/client.py（snapshots 与落盘）。
   - SOP：docs/sop/search_o1_answering_sop.md（“观测与排障”“质量验收清单”）。
 - 检索中立策略（反模式约束）
   - 说明：禁止在 retriever/query_instruction 注入品牌或白名单；仅允许通用超参调整；基于证据内容一致性做去重。
@@ -123,13 +120,40 @@ User Q ─┐
         │
         └─ 收官 finalize:
               prompt.search_o1_finalize
-              generation.generate         →  \boxed{...} (应包含)
-              custom.search_o1_ensure_stop→  若需补 <|im_end|>
-              custom.output_extract_from_boxed → pred_ls
-              evaluation.evaluate         →  metrics JSON（可为 0）
+              generation.generate
+              custom.output_passthrough   →  Markdown 文本
 
 Artifacts: logs/*, output/memory_*（可观测）
 ```
+
+## 数据入库警告（未来改造的硬性提醒与真实案例）
+
+为保持检索中立、答案可信与可审计，README 入库阶段（ModelScope → Chroma）存在的已知风险必须在后续迭代中修复。当前实现优先保证跑通，尚未在“入库前”做强清洗，导致检索结果可能混入噪声。
+
+- 脏源未移除（HTML/徽章/资源链接碎片）
+  - 现象：检索段落混入非正文片段，如 `gle.com/assets/colab-badge.svg`、`Open In Colab`、`<img ...>` 残片。
+  - 成因：`script/modelscope_docs_sync.py` 将 README 原文（可能为 HTML/JSON）直接入库后再切片与嵌入，非正文元素随之进入向量库。
+
+- 切片不按段/句（易产生“半标签/半属性”）
+  - 现象：出现被截断的属性或标签尾段（例：`... alt=\"Open In Colab\"`），清洗难以完全剥离。
+  - 成因：`split_text()` 以字符窗为主，对 HTML/JSON 结构不敏感，可能在标签/属性中部断裂。
+
+- 清洗不足（入库后清洗，鲁棒性有限）
+  - 现象：检索结果仍含转义或乱码，如 `\u003cdiv\u003e`、`Ã¥Â…`（mojibake），以及 `modelscope://MusePublic/Qwen-image?revision=v1` 这类资源 URL 噪音。
+  - 成因：`src/ultrarag/utils.py: normalize_readme_text()` 假设“完整 JSON/HTML”，对“半标签/混合转义/属性残片”鲁棒性不足。
+
+真实案例（来自运行快照 output/memory__run_20251009_214415.json）
+- `gle.com/assets/colab-badge.svg`（Colab 徽章链接尾段）
+- `modelscope://MusePublic/Qwen-image?revision=v1`（资源 URL）
+- `Ã¥Â…` 等编码残影（mojibake）
+
+改造建议（不改变中立检索边界）
+- 入库前清洗：在 `chunk_worker` 对 `doc.content` 先调用 `normalize_readme_text()`，将清洗后的纯文本用于切片与嵌入，避免把 HTML/JSON 垃圾写入 Chroma。
+- 切片改进：`split_text()` 优先按“段落/标题/列表项/句子”分段，避免在标签/属性中间断裂。
+- 清洗兜底：提高 `normalize_readme_text()` 对“半标签/孤立属性/大量转义”的兜底（例如剔除 `assets/*.svg`、`Open In Colab` 等徽章/资源行）。
+- 验收门槛：
+  - 单条 `ret_psg` 中非文字噪声（URL/标签/转义）的可见占比 < 10%。
+  - 上述“真实案例”在新入库后不再出现在检索段落中。
 
 ## 迭代原则（Principles）
 - Unix 哲学：执行与采集解耦（runner 做执行，collector/快照做观测）；组件职责单一，可组合。
