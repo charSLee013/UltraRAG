@@ -6,6 +6,14 @@ UltraRAG’s Python package lives in `src/ultrarag`, containing the CLI entry (`
 ## Build, Test, and Development Commands
 `uv pip install -e .` performs an editable install with the recommended dependency manager; `pip install -e .` is acceptable when uv is unavailable. Use `conda env create -f environment.yml` to mirror the full GPU-ready stack, then `conda activate ultrarag`. Validate the CLI with `ultrarag run examples/sayhello.yaml` before starting feature work. During MCP development, point the client at a custom YAML via `ultrarag run servers/<module>/pipeline.yaml` to smoke-test flows.
 
+### Python Interpreter Rule (.venv first) — Hard Requirement
+- If a project-local virtualenv exists at `.venv/`, all Python entrypoints and spawned subprocesses MUST use its interpreter.
+  - Shell: prefer `. .venv/bin/activate` or invoke explicitly via `.venv/bin/python ...` (e.g., `.venv/bin/python -m pytest`).
+  - Subprocess (code): when launching MCP servers or helper scripts, resolve the interpreter to `.venv/bin/python` if present; otherwise fall back to `sys.executable`.
+  - CI/scripts: never mix Conda Python and `.venv` within the same run. The parent process and all children must share the same interpreter path.
+- Rationale: prevents “parent can import, child cannot” failures (e.g., `ModuleNotFoundError: ultrarag/jsonlines`) caused by interpreter splits; ensures reproducible imports and dependency isolation.
+- Smoke guidance: if `.venv/` is absent, use the current interpreter consistently and install dependencies into it (`python -m pip install -e .`).
+
 ## Coding Style & Naming Conventions
 Follow standard Python 3.11 guidelines: four-space indents, double quotes for user-facing strings, and type hints on new public functions. Name modules and servers in lowercase with underscores (`retriever_server.py`), and align YAML step names with their tool intent (`retrieve_passages`, `rerank_answers`). Prefer extracting shared logic into `src/ultrarag/utils.py` instead of duplicating code inside server directories.
 
@@ -26,22 +34,24 @@ To keep Search‑o1 flows neutral, reproducible, and auditable, follow these rul
 
 - Clear responsibility boundaries (must):
   - Retriever → recall + text cleaning only (no semantic filtering by brand/source).
-  - Prompt/Generation → integrate evidence, structure and deduplicate facts, and produce a final boxed answer (`\boxed{...}`).
-  - Router/Loop → decide `retrieve` vs `stop` via explicit markers (`<|end_search_query|>`, `<|im_end|>`); loop `times` is an upper bound.
+  - Prompt/Generation → integrate evidence, structure and deduplicate facts, and produce the final Markdown answer exactly once (no alternate formats).
+- Router/Loop → decide `retrieve` vs `stop` via explicit markers (`<<SRCH_Q_END>>`, `<<FINAL_ANSWER_END>>`); loop `times` 是上限。
 
 - Prohibited patterns (do not):
   - Injecting terms like “Qwen/Qwen2/Qwen3 系列模型列表” or similar domain hints into retriever instructions.
   - Whitelisting or blacklisting sources (e.g., `repo_author == 'Qwen'`).
   - Hard‑coding domain knowledge or heuristics into server code/parameters that bias retrieval outcomes.
+  - Keeping legacy output paths or "compatibility modes" (for example boxed extractors) or weakening the single path with "optional" wording.
 
 - Allowed safe tuning (okay):
   - Adjust generic hyper‑parameters (e.g., `top_k`, temperature, `max_tokens`, loop `times`).
-  - Improve prompts to request structured, deduplicated lists and to emit `<|im_end|>` once sufficient evidence is gathered.
+- Improve prompts to request structured, deduplicated lists and to emit `<<FINAL_ANSWER_END>>` once sufficient evidence is gathered。
   - Evidence‑based deduplication/merging in refinement (on content agreement), never deletion based on source identity.
 
 - Observability & reproducibility (must):
   - Preserve `memory_*` snapshots (prompts, answers, `ret_psg`, `metadata`) for each step; avoid hidden filters.
   - Keep logs informative without leaking secrets; never mask or strip source provenance in diagnostic output.
+  - Output contract is singular: emit Markdown via `custom.output_passthrough`; any change must update the SOP first and remove the previous implementation.
 
 - Specification‑First (must):
   - Any behavioral change to retrieval/loop/termination must be updated in `docs/sop/search_o1_answering_sop.md` before implementation.
