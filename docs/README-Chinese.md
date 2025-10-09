@@ -208,7 +208,7 @@ UltraRAG 2.0 开箱即用，内置支持当前 RAG 领域最常用的 **公开�
 | [IterRetGen](https://arxiv.org/abs/2305.15294)   | examples/IterRetGen.yaml     |
 | [RankCoT](https://arxiv.org/abs/2502.17888)   | examples/RankCoT.yaml   |
 | [R1-searcher](https://arxiv.org/abs/2503.05592)   | examples/r1_searcher.yaml     |
-| [Search-o1](https://arxiv.org/abs/2501.05366)   | examples/search_o1.yaml   |
+| [Search-o1](https://arxiv.org/abs/2501.05366)   | pipelines/search_o1/run.yaml（`SearchO1Pipeline`） |
 | [Search-r1](https://arxiv.org/abs/2503.09516)   | examples/search_r1.yaml     |
 | WebNote   | examples/webnote.yaml    |
 
@@ -230,4 +230,3 @@ UltraRAG 2.0 开箱即用，内置支持当前 RAG 领域最常用的 **公开�
 
 - 关于技术问题及功能请求，请使用 [GitHub Issues](https://github.com/OpenBMB/UltraRAG/issues) 功能。
 - 关于使用上的问题、意见以及任何关于 RAG 技术的讨论，欢迎加入我们的[微信群组](https://github.com/OpenBMB/UltraRAG/blob/main/docs/wechat_qr.png)，[飞书群组](https://github.com/OpenBMB/UltraRAG/blob/main/docs/feishu_qr.png)和[discord](https://discord.gg/yRFFjjJnnS)，与我们共同交流。
-

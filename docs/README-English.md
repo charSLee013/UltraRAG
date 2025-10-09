@@ -238,7 +238,7 @@ UltraRAG 2.0 is ready to use out-of-the-box, natively supporting the most common
 | [IterRetGen](https://arxiv.org/abs/2305.15294)   | examples/IterRetGen.yaml     |
 | [RankCoT](https://arxiv.org/abs/2502.17888)   | examples/RankCoT.yaml   |
 | [R1-searcher](https://arxiv.org/abs/2503.05592)   | examples/r1_searcher.yaml     |
-| [Search-o1](https://arxiv.org/abs/2501.05366)   | examples/search_o1.yaml   |
+| [Search-o1](https://arxiv.org/abs/2501.05366)   | pipelines/search_o1/run.yaml (`SearchO1Pipeline`) |
 | [Search-r1](https://arxiv.org/abs/2503.09516)   | examples/search_r1.yaml     |
 | WebNote   | examples/webnote.yaml    |
 

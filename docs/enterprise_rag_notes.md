@@ -19,7 +19,7 @@
 
 **架构要点（MCP + 低代码编排）**
 - MCP 组件化：每个能力（检索/重排/提示词/生成/评测/路由等）是独立 MCP Server，统一以 tool/prompt 暴露接口，便于热插拔与复用。参见：src/ultrarag/server.py:32、src/ultrarag/server.py:111、src/ultrarag/server.py:147。
-- 低代码 Pipeline：用 YAML 声明串行、循环、条件分支；Client 负责变量/记忆体管理与调度执行。参见：src/ultrarag/client.py:1018、examples/search_r1.yaml:21、examples/search_o1.yaml:21。
+- 低代码 Pipeline：用 YAML 声明串行、循环、条件分支；Client 负责变量/记忆体管理与调度执行。参见：src/ultrarag/client.py:1018、examples/search_r1.yaml:21、pipelines/search_o1/run.yaml:21。
 - I/O 自动编译：根据函数签名与装饰器的 `output="in1,in2->out1"`，自动生成可审计的 server.yaml（I/O 映射）与汇总的 pipeline 级参数/服务文件。参见：src/ultrarag/server.py:286、src/ultrarag/server.py:308、src/ultrarag/client.py:580、src/ultrarag/client.py:788、src/ultrarag/client.py:803。
 
 ---
@@ -38,7 +38,7 @@
 - 可控切片策略：token/word/sentence/recursive 四种 chunker 与可选 tokenizer，尽量对齐自然边界，降低跨句断裂。参见：servers/corpus/src/corpus.py:41、servers/corpus/src/corpus.py:68。
 - 多模态直达：对扫描件/图片/表格截图不做强制 OCR，走 `is_multimodal` → image embedding；生成阶段以 `image_url` 传入 VLM，保留原始结构语义。参见：servers/retriever/src/retriever.py:241、servers/retriever/src/retriever.py:263、servers/generation/src/generation.py:156、servers/generation/src/generation.py:189。
 - 相关性提升：粗召回后重排（Reranker）或 MaxSim（查询/文档 token 级最大相似度求和），抑制“坏切片”影响。参见：servers/reranker/src/reranker.py:18、servers/reranker/src/reranker.py:41、servers/retriever/src/retriever.py:499、servers/retriever/src/retriever.py:548、servers/retriever/src/retriever.py:571。
-- 迭代补证据：Search‑o1 / Search‑r1 以 loop+branch 反复“检索→推理→补检索”，直到路由判定完成，自动修正首轮误差。参见：examples/search_r1.yaml:21、examples/search_r1.yaml:25、examples/search_o1.yaml:21、examples/search_o1.yaml:26。
+- 迭代补证据：Search‑o1 / Search‑r1 以 loop+branch 反复“检索→推理→补检索”，直到路由判定完成，自动修正首轮误差。参见：examples/search_r1.yaml:21、examples/search_r1.yaml:25、pipelines/search_o1/run.yaml:21、pipelines/search_o1/run.yaml:26。
 
 ---
 
@@ -76,7 +76,7 @@
 **快速验证**
 - 安装：`pip install -e .`（或 `uv pip install -e .`）。
 - 最小示例：`ultrarag run examples/sayhello.yaml`（读取 `examples/parameter/sayhello_parameter.yaml`）。
-- 在线检索模板：配置 `.env` 的 `TAVILY_API_KEY`/`EXA_API_KEY` 后，`ultrarag run examples/search_r1.yaml` 或 `examples/search_o1.yaml`。
+- 在线检索模板：配置 `.env` 的 `TAVILY_API_KEY`/`EXA_API_KEY` 后，`ultrarag run examples/search_r1.yaml` 或使用 `SearchO1Pipeline` 调用 `pipelines/search_o1/run.yaml`。
 - 本地 vLLM：`generation.initialize_local_vllm` 启动后把 `base_url` 指到服务。参见：servers/generation/src/generation.py:51。
 
 ---
@@ -157,11 +157,11 @@
       - Search‑o1：在 o1‑style 长链路推理中注入“自主检索 + 文档内推理（Reason‑in‑Documents）”，当模型在思维链出现知识不确定时，用特殊标记触发检索，随后对检索文档进行“在文档中推理/精炼”再回填到主思维链，循环直至完成。参见论文与项目页。〔外部：arXiv 2501.05366〕
       - Search‑r1 / R1‑Searcher：以 RL（结果监督为主）训练模型学会在推理过程中何时、如何调用搜索引擎并多轮交互，强调“推理‑工具调用”交替的行为学习（非仅提示工程）。〔外部：arXiv 2503.09516；arXiv 2503.05592；R1‑Searcher++ 2505.17005；实证综述 2505.15117〕
     - UltraRAG 中的实现（可运行链路）：
-      - Search‑o1 流水线：`examples/search_o1.yaml`
+      - Search‑o1 流水线：`pipelines/search_o1/run.yaml`
         - 初始化与首轮生成：`prompt.search_o1_init` → `generation.generate`（行 17–19）。
         - 迭代循环（行 21–42）：
           - 路由判定：`router.search_o1_check`（是否 `retrieve`/`stop`）。
-          - 若需检索：`custom.search_o1_query_extract`（抽取 `<|begin_search_query|>...<|end_search_query|>`）、`retriever.retriever_deploy_search`（把 query_list 交给检索）。
+          - 若需检索：`custom.search_o1_query_extract`（抽取 `<<SRCH_Q_BEGIN>>...<<SRCH_Q_END>>`）、`retriever.retriever_deploy_search`（把 query_list 交给检索）。
           - 文档内推理与融合：`prompt.searcho1_reasoning_indocument`（结合历史推理 + 文档）、`generation.generate`；随后 `prompt.search_o1_insert` 把检索结果以特殊段落插回思维链，再次 `generation.generate` 推进。
         - 相关模板：`prompt/search_o1_reasoning.jinja`、`prompt/search_o1_refinement.jinja`（位于 `prompt/` 目录）。
         - 关键代码：
@@ -186,7 +186,7 @@
       - Search‑o1：论文提出“在文档中推理”模块以改善检索冗余干扰，报告在科学/数学/编程及 6 个开放域 QA 上优于若干基线；社区有人质疑“命名含 o1 是否准确贴合技术路线”。〔外部：arXiv 2501.05366；GitHub Issue 对命名的讨论〕
       - Search‑r1 / R1‑Searcher 系列：多篇工作报告通过结果监督 RL 学会“何时搜/怎么搜”，在 HotpotQA、2WikiMultiHopQA、Musique、Bamboogle 等任务上相对传统 RAG/提示式工具调用取得提升，并出现 R1‑Searcher++ 等后续增强；同时有实验综述提示奖励设计、底模选择、搜索引擎类型对训练稳定性与效果影响很大。〔外部：arXiv 2503.09516；2503.05592；2505.17005；2505.15117〕
   - 相关代码/范例指针：
-    - `examples/search_o1.yaml:13–46`、`examples/search_r1.yaml:13–46`
+    - `pipelines/search_o1/run.yaml:13–46`、`examples/search_r1.yaml:13–46`
     - `servers/router/src/router.py:36`、`:81`、`:108`；`servers/custom/src/custom.py:9`、`:112`；`servers/prompt/src/prompt.py:239`、`:259`、`:279`、`:294`、`:317`
     - `src/ultrarag/client.py:400`、`:433`、`:880`；`script/case_study.py`
   - 外部参考（论文/仓库）：
@@ -201,11 +201,11 @@
   - 解答要点（机制 × 代码）：
     - 闭环控制，按需检索：
       - Router 工具把“是否需要继续检索”显式化为状态（如 `retrieve/stop`、`complete/incomplete`），从而形成“生成→判定→（可能）检索→在文档推理→回填→再生成”的闭环。UltraRAG Client 仅对匹配 state 的样本执行分支，其他样本提前终止，减少噪声与成本。
-      - 路由检查：`servers/router/src/router.py:108`（search_o1_check 依据 `<|im_end|>`/`<|end_search_query|>` 判定）、`servers/router/src/router.py:36`（search_r1_check 依据 `<|endoftext|>`/`<|im_end|>` 等判定）。
+      - 路由检查：`servers/router/src/router.py:108`（search_o1_check 依据 `<<FINAL_ANSWER_END>>`/`<<SRCH_Q_END>>` 判定）、`servers/router/src/router.py:36`（search_r1_check 依据 `<|endoftext|>`/`<|im_end|>` 等判定）。
       - 分支执行与样本对齐：`src/ultrarag/client.py:880`（执行分支）、`src/ultrarag/client.py:400`、`src/ultrarag/client.py:433`（对齐 per‑sample 的 `{data,state}` skeleton 并传播 state）。
     - 动态查询重构，缩小检索误差：
       - 自然语言推理后再抽取“最新查询”，逐轮逼近信息需求，避免一轮内把模糊问题硬检索。
-      - 查询抽取：`servers/custom/src/custom.py:9`（Search‑r1 `<search>...</search>`）、`servers/custom/src/custom.py:112`（Search‑o1 `<|begin_search_query|>...<|end_search_query|>`）。
+      - 查询抽取：`servers/custom/src/custom.py:9`（Search‑r1 `<search>...</search>`）、`servers/custom/src/custom.py:112`（Search‑o1 `<<SRCH_Q_BEGIN>>...<<SRCH_Q_END>>`）。
     - 在文档中推理，先消噪再回填：
       - 不是直接把整段检索结果拼到提示词，而是通过模板“把历史推理（思路）与命中文档”注入一个专门的“文档内推理”阶段，先产出条理化的中间结论，再回填到主思维链继续生成，从而降低长文直接拼接带来的噪声。
       - 模板/工具：`servers/prompt/src/prompt.py:294`（searcho1_reasoning_indocument）、`servers/prompt/src/prompt.py:317`（search_o1_insert 把 `<|begin_search_result|>...<|end_search_result|>` 插回思维链）。
