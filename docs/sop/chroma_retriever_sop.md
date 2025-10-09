@@ -55,3 +55,30 @@
 - 增量判断必须发生在发请求前，避免串行 fetch 成为短板。
 - SOP 是唯一事实源：任何实现偏离需先更新 SOP。
 - 在范围收敛、仓库级跳过落地前，进一步并发表现有限。
+
+## 数据卫生警告（必须阅读）
+
+以下问题已在真实运行中观测到，均源自“原文直接入库 → 事后切片/清洗”的流程。为保证检索-推理质量与中立性，后续入库迭代必须按本节约束整改。
+
+1) 脏源未移除（HTML/徽章/资源链接碎片）
+- 现象：检索段落混入 `gle.com/assets/colab-badge.svg`、`Open In Colab`、`<img ...>` 等非正文残片。
+- 真实示例：`gle.com/assets/colab-badge.svg`（出自运行快照 output/memory__run_20251009_214415.json）。
+- 原因：README 原文（HTML/JSON）在 `script/modelscope_docs_sync.py` 中直接写入后切片入库。
+
+2) 切片不按段/句（半标签/半属性）
+- 现象：出现 `... alt=\"Open In Colab\"` 等被截断的属性尾段，清洗器难以完全剥离。
+- 原因：`split_text()` 基于字符窗切分，对 HTML/JSON 结构不敏感，可能在标签/属性中间断裂。
+
+3) 清洗不足（入库后清洗，鲁棒性有限）
+- 现象：检索结果仍含 `\u003cdiv\u003e` 或 `Ã¥Â…`（mojibake）、以及 `modelscope://MusePublic/Qwen-image?revision=v1` 等资源 URL 噪音。
+- 原因：`src/ultrarag/utils.py: normalize_readme_text()` 假设“完整 JSON/HTML”；对“半标签/混合转义/属性残片”覆盖不足。
+
+整改建议（不改变中立检索边界）
+- 入库前清洗：在 `chunk_worker` 将 `doc.content` 先经 `normalize_readme_text()`，以清洗后的纯文本进入切片与嵌入。
+- 切片改进：`split_text()` 优先采用“段落/标题/列表项/句子”边界，避免在标签/属性中断裂。
+- 清洗兜底：为 `normalize_readme_text()` 增加对“半标签/孤立属性/大量转义”的兜底删除规则（如 `assets/*.svg`、`Open In Colab` 行）。
+
+验收标准（必须量化）
+- 单条检索段落中非文字噪声（URL/标签/转义）可见占比 < 10%。
+- 上述“真实示例”在新入库后不再出现在 `ret_psg`。
+- `clean_state` 字段统计：`html_stripped/json_decoded` 占比提升、`raw` 占比下降（同等数据规模下）。

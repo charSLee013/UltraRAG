@@ -10,7 +10,7 @@
 - 范围仅限 `script/modelscope_docs_sync.py` 同步的 README/说明集合，不接入模型二进制、代码文件或其他非说明文本。
 - 数据现状：README 向量索引位于 `output/modelscope_docs/chroma`；SQLite 仅含 `docs/chunks/repo_state` 三表，支持基于 `(repo_type, owner, name)` 的增量跳过。
 - 检索工具已就位：`retriever_init_readme` / `retriever_search_readme` 已在 `servers/retriever/src/retriever.py` 实现；旧名 `retriever_init_chroma` / `retriever_search_chroma` 作为别名直连新实现（向后兼容）。
-- YAML 已切换：`examples/rag.yaml`、`examples/search_o1.yaml` 使用 README 检索工具；Search‑o1 所需模板在 `servers/prompt/parameter.yaml` 中声明。
+- YAML 已切换：`examples/rag.yaml`、`pipelines/search_o1/run.yaml` 使用 README 检索工具；Search‑o1 所需模板由 `pipelines/search_o1/parameter/run_parameter.yaml` 管理。
 - 编程风格：最小化 + fail-fast；不做运行时兜底生成冗余元数据。
 
 ## 环境变量与参数
@@ -23,7 +23,7 @@
    - 返回结构（最小合同）：`{"ret_psg": [[...]], "metadata": [[{"repo_author","repo_name","score"}, ...]]}`。
    - 可选诊断字段：`clean_state` 用于标注清洗路径（`html_stripped/json_decoded/raw`）。不返回 `source_url/revision/path` 等非必需字段。
 2. **YAML 对接**
-   - 更新 `examples/rag.yaml`、`search_o1.yaml` 等，使检索步骤调用新工具。
+   - 更新 `examples/rag.yaml`、`pipelines/search_o1/run.yaml` 等，使检索步骤调用新工具。
    - 若 Search-o1/S1 需要多轮检索，保持现有 loop 结构不变，仅替换底层检索工具。
 3. **配置**
    - `.env`、`servers/retriever/parameter.yaml` 仅包含 README 检索必需项；不引入与溯源 URL 相关的生成逻辑或兜底参数。
