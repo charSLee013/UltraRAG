@@ -126,7 +126,7 @@ User Q ─┐
 Artifacts: logs/*, output/memory_*（可观测）
 ```
 
-## 数据入库警告（未来改造的硬性提醒与真实案例）
+## 数据入库警告（待解决问题）
 
 为保持检索中立、答案可信与可审计，README 入库阶段（ModelScope → Chroma）存在的已知风险必须在后续迭代中修复。当前实现优先保证跑通，尚未在“入库前”做强清洗，导致检索结果可能混入噪声。
 
@@ -164,3 +164,10 @@ Artifacts: logs/*, output/memory_*（可观测）
 
 ---
 注：本文档聚焦社区问答/Search‑o1 能力的设计与现状；与之配套的规范请见 docs/sop/search_o1_answering_sop.md 与 AGENTS.md 的检索中立章节。
+
+### Ingestion Pipeline SOP 升级说明
+
+- `docs/sop/chroma_retriever_sop.md` 曾定义模型库 README 同步的早期流程，在缺乏统一抽象的情况下仍然保证了最小可用的索引能力。
+- `docs/sop/ingestion_pipeline_sop.md` 在此基础上引入统一的 `fetch → process → ingest` 抽象、单队列 Runner 以及严格的两阶段写入，对原始流程做了完全替代。
+- 当新版 SOP 完成实施并通过验收后，应移除 `docs/sop/chroma_retriever_sop.md` 及其对应的旧实现文件（含 legacy store/runner 代码），避免两套逻辑并存。
+

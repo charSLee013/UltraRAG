@@ -82,3 +82,43 @@
 - 单条检索段落中非文字噪声（URL/标签/转义）可见占比 < 10%。
 - 上述“真实示例”在新入库后不再出现在 `ret_psg`。
 - `clean_state` 字段统计：`html_stripped/json_decoded` 占比提升、`raw` 占比下降（同等数据规模下）。
+
+## 数据入库警告（待解决问题）
+
+为保持检索中立、答案可信与可审计，README 入库阶段（ModelScope → Chroma）存在的已知风险必须在后续迭代中修复。当前实现优先保证跑通，尚未在“入库前”做强清洗，导致检索结果可能混入噪声。
+
+- 脏源未移除（HTML/徽章/资源链接碎片）
+  - 现象：检索段落混入非正文片段，如 `gle.com/assets/colab-badge.svg`、`Open In Colab`、`<img ...>` 残片。
+  - 成因：`script/modelscope_docs_sync.py` 将 README 原文（可能为 HTML/JSON）直接入库后再切片与嵌入，非正文元素随之进入向量库。
+
+- 切片不按段/句（易产生“半标签/半属性”）
+  - 现象：出现被截断的属性或标签尾段（例：`... alt=\"Open In Colab\"`），清洗难以完全剥离。
+  - 成因：`split_text()` 以字符窗为主，对 HTML/JSON 结构不敏感，可能在标签/属性中部断裂。
+
+- 清洗不足（入库后清洗，鲁棒性有限）
+  - 现象：检索结果仍含转义或乱码，如 `\u003cdiv\u003e`、`Ã¥Â…`（mojibake），以及 `modelscope://MusePublic/Qwen-image?revision=v1` 这类资源 URL 噪音。
+  - 成因：`src/ultrarag/utils.py: normalize_readme_text()` 假设“完整 JSON/HTML”，对“半标签/混合转义/属性残片”鲁棒性不足。
+
+真实案例（来自运行快照 `output/memory__run_20251009_214415.json`）
+- `gle.com/assets/colab-badge.svg`（Colab 徽章链接尾段）
+- `modelscope://MusePublic/Qwen-image?revision=v1`（资源 URL）
+- `Ã¥Â…` 等编码残影（mojibake）
+
+> 说明：上述问题的解决路径见 README Hardening SOP；本 SOP 在“实施计划/质量验收”中同步要求将清洗前移至入库前并设置质量闸（阈值与抽样策略）。
+
+## 入库来源（覆盖范围）
+
+为保证知识覆盖并减少偏置，入库来源限定为 ModelScope 官方/社区面向开发者的文档与仓库页面（仅说明类文本）：
+
+- 文档中心（魔搭平台功能介绍）：https://www.modelscope.cn/docs/overview
+- 研习社（模型解读与最佳实践）：https://modelscope.cn/learn
+- GitHub（魔搭开源项目技术类文档）：https://github.com/modelscope
+- 模型库：https://modelscope.cn/models
+- 数据集：https://modelscope.cn/datasets
+- 创空间应用：https://modelscope.cn/studios
+- MCP：https://www.modelscope.cn/mcp
+- AIGC 生图和训练：https://www.modelscope.cn/aigc
+
+约束：
+- 仅抓取 README/CHANGELOG/docs/**/*.md/.rst/.txt 等说明类文本；不下载模型二进制与非说明文件。
+- 单条文档大小上限与切片/嵌入速率受本 SOP 对应环境变量与限流策略约束。
