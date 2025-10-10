@@ -7,6 +7,7 @@
 | 领域 | 当前成果 | 对应 SOP / 文档 |
 | --- | --- | --- |
 | README 语料抓取 | `script/modelscope_docs_sync.py` 定期同步 ModelScope README 至 `output/modelscope_docs/chroma`，支撑 Env-first 检索。 | `docs/sop/readme_retriever_hardening_sop.md` |
+| 数据入库抽象 | 正在执行的 `fetch → process → ingest` 统一管线，替代旧版 chroma retriever 流程。 | `docs/sop/ingestion_pipeline_sop.md` |
 | 检索-推理闭环 | 通过 Python API 以 Search‑o1 范式执行（init→loop→finalize），loop 次数由参数注入；不依赖 CLI/脚本。 | `docs/sop/search_o1_answering_sop.md` |
 | 模板与停词固化 | 使用通用模板（reasoning/refinement/finalize）与最小停词；输出协议收敛为 Markdown，由 `custom.output_passthrough` 透传。 | `docs/sop/search_o1_answering_sop.md` |
 | 自定义工具链 | `custom.search_o1_query_extract`（读 TokenContract）、`router.search_o1_check`（读 TokenContract）、`custom.output_passthrough`（去停词并透传 Markdown）。 | `docs/sop/search_o1_answering_sop.md` |
@@ -169,5 +170,4 @@ Artifacts: logs/*, output/memory_*（可观测）
 
 - `docs/sop/chroma_retriever_sop.md` 曾定义模型库 README 同步的早期流程，在缺乏统一抽象的情况下仍然保证了最小可用的索引能力。
 - `docs/sop/ingestion_pipeline_sop.md` 在此基础上引入统一的 `fetch → process → ingest` 抽象、单队列 Runner 以及严格的两阶段写入，对原始流程做了完全替代。
-- 当新版 SOP 完成实施并通过验收后，应移除 `docs/sop/chroma_retriever_sop.md` 及其对应的旧实现文件（含 legacy store/runner 代码），避免两套逻辑并存。
-
+- 当新版 SOP 完成实施并通过验收后，应移除 `docs/sop/chroma_retriever_sop.md` 及其对应的旧实现文件，避免两套逻辑并存。典型路径包括：`script/modelscope_docs_sync.py`（旧同步脚本）、`stores/chroma_*`、`runner_legacy.py` 等 legacy 代码。
