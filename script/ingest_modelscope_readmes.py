@@ -61,13 +61,26 @@ def _int_env(name: str, default: int) -> int:
 async def _run_ingestion() -> None:
     _ensure_embedding_env()
 
-    page_size = _int_env("MODELSCOPE_PAGE_SIZE", 5)
+    target_models = _int_env("MODELSCOPE_MODEL_SIZE", 0)
+    if target_models <= 0:
+        target_models = _int_env("MODELSCOPE_PAGE_SIZE", 5)
 
     sqlite_store = SQLiteStore()
     chroma_store = ChromaStore()
     ingestor = SqliteChromaIngestor(sqlite_store, chroma_store)
 
-    pipeline = ModelScopeModelsPipeline(page_size=page_size)
+    existing_content_hashes: set[str] = set()
+    try:
+        cur = sqlite_store.conn.execute("SELECT content_hash, repo_id FROM repo")
+        for content_hash, repo_id in cur.fetchall():
+            existing_content_hashes.add(content_hash or repo_id)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to enumerate existing repo ids: {exc}") from exc
+
+    pipeline = ModelScopeModelsPipeline(
+        page_size=target_models or None,
+        existing_content_hashes=existing_content_hashes,
+    )
     embed_fn = get_default_embed_fn()
 
     limits = PipelineRuntimeLimits()
@@ -84,6 +97,7 @@ async def _run_ingestion() -> None:
             repo=raw.locator.owner_repo,
             chunks=len(records),
         )
+        pipeline.register_ingested_hash(raw.content_hash)
 
     runner = IngestionRunner(
         pipeline,

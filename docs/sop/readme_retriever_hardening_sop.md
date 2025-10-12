@@ -33,6 +33,11 @@
   - 生成模型相关能力（本阶段聚焦可检索性与数据质量）。
 
 ## 规格（Spec）
+
+0. 数据来源与官方 API 合规
+- README 向量库只能消费《ingestion_pipeline_sop.md》里列出的八大 ModelScope 官方渠道（Docs / Learn / GitHub / Models / Datasets / Studios / MCP / AIGC），且默认优先使用各渠道提供的官方 API 或标准页面结构，避免抓取非官方镜像或第三方备份。
+- 对“模型库：https://modelscope.cn/models”这一来源，可复用官方 Hub API（如 `HubApi.list_models`/`get_model_files`/`get_model` 等等）获取列表与 README 元数据；其它来源必须按各自的官方 API 或前台页面规范实现，禁止直接照搬模型库的 API 调用，避免误抓造成的噪声。
+- 若某来源缺乏公开 API，应在 SOP 中先补充说明抓取策略与合规性，再行编码；未经文档更新不得引入新的抓取路径。
 1. 文档解码与清洗（retriever_search_readme）
 - 识别 JSON/转义载荷：对候选段落尝试 `json.loads`（最多 2 次以处理双层转义）。
 - 字段优先级：优先取 `ReadMeContent` 或 `readme`；无则回退 `content/text`；均无则返回原文（标记 `clean_state=raw`）。

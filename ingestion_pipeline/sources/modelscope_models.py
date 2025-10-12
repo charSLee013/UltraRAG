@@ -5,12 +5,15 @@ import json
 import logging
 import os
 import random
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncIterator, Dict, Iterable, List, Optional, Tuple
 
-import httpx
 from dotenv import load_dotenv
+from modelscope.hub.api import HubApi, ModelScopeConfig
+from modelscope.hub.file_download import get_file_download_url
+from requests import exceptions as requests_exc
 
 from ..base import BaseIngestionPipeline, EmbedFn
 from ..types import ChunkDraft, ChunkRecord, RawDocument, SourceLocator, SourceType
@@ -21,69 +24,61 @@ load_dotenv()
 class ModelScopeModelsPipeline(BaseIngestionPipeline):
     """Ingestion pipeline for models listed on ModelScope (modelscope.cn/models).
 
-    The fetch stage queries the public `dolphin/models` endpoint with PUT
-    requests, applies exponential backoff for 429/5xx responses, normalizes README
-    metadata (case-insensitive resolution), and emits `RawDocument` entries.
-    The process stage cleans README text, chunks it according to `chunk_max_size`,
+    The fetch stage paginates via the official Hub API (`HubApi.list_models`),
+    resolves each repository's README through `HubApi.get_model_files` and
+    `get_file_download_url`, and emits `RawDocument` entries once README content
+    is available. The constructor `page_size` argument (and its corresponding
+    `MODELSCOPE_MODEL_SIZE` env overrides) defines the
+    minimum number of successful repositories this pipeline should yield; the
+    Hub API pagination size is capped at 100 and derived from that target. The
+    process stage cleans README text, chunks it according to `chunk_max_size`,
     and invokes the provided `EmbedFn`, returning `ChunkRecord` objects without
-    touching downstream stores. Ingest is intentionally left to the runner's
+    touching downstream stores. Ingest is delegated to the runner's
     `SqliteChromaIngestor`.
     """
-
-    DEFAULT_ENDPOINT = "https://modelscope.cn/api/v1/dolphin/models"
-    RETRY_STATUS = {429, 500, 502, 503, 504}
-    README_CANDIDATES = (
-        "README.md",
-        "Readme.md",
-        "readme.md",
-        "README.MD",
-        "README.markdown",
-        "ReadMe.md",
-        "Readme.MD",
-    )
-
     def __init__(
         self,
         *,
-        page_size: Optional[int] = 20,
-        sort_by: str = "Default",
-        target: str = "",
+        page_size: Optional[int] = 100,
         max_retries: int = 5,
         initial_backoff: float = 1.0,
         backoff_factor: float = 2.0,
         timeout: float | None = 60.0,
-        existing_repo_ids: Optional[Iterable[str]] = None,
-        session_headers: Optional[Dict[str, str]] = None,
+        existing_content_hashes: Optional[Iterable[str]] = None,
     ) -> None:
-        self.endpoint = os.environ.get("MODELSCOPE_MODELS_API_URL", self.DEFAULT_ENDPOINT)
         if page_size is not None and page_size < 1:
-            raise ValueError("page_size must be None or an integer >= 1")
-        self.page_size = page_size
-        self.sort_by = sort_by
-        self.target = target
+            raise ValueError("page_size must be >= 1 or None")
+
+        if page_size is None:
+            self.target_repo_count: Optional[int] = None
+            self.api_page_size = 100
+        else:
+            self.target_repo_count = int(page_size)
+            self.api_page_size = min(self.target_repo_count, 100)
+
         self.max_retries = max(1, max_retries)
         self.initial_backoff = max(0.1, initial_backoff)
         self.backoff_factor = max(1.0, backoff_factor)
-        self.timeout = timeout
-        self._existing_repo_ids = set(existing_repo_ids or [])
-        self._base_headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "User-Agent": self._build_user_agent(),
-            "Referer": "https://modelscope.cn/",
-            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Connection": "keep-alive",
-            "Origin": "https://modelscope.cn",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        if session_headers:
-            self._base_headers.update(session_headers)
+        self.list_timeout = float(timeout or 60.0)
+        self.readme_timeout = 60.0
+        self.delay_range = (0.1, 3.5)
+        self._existing_content_hashes = set(filter(None, existing_content_hashes or []))
+        self._baseline_content_count = len(self._existing_content_hashes)
         self.logger = logging.getLogger("ingestion.sources.modelscope_models")
+
+        endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or None
+        self._hub_api = HubApi(endpoint=endpoint, timeout=self.list_timeout, max_retries=self.max_retries)
+        token = os.environ.get("MODELSCOPE_API_TOKEN")
+        if token:
+            try:
+                self._hub_api.login(token, endpoint=self._hub_api.endpoint)
+            except Exception as exc:
+                self.logger.warning("[modelscope.fetch] login failed: %s", exc)
+
+    def register_ingested_hash(self, content_hash: str) -> None:
+        """Record a content_hash after a successful ingest to keep skip lists in sync."""
+        if content_hash:
+            self._existing_content_hashes.add(content_hash)
 
     async def fetch(
         self,
@@ -97,106 +92,146 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         Args:
             force: When False, entries whose repo_id is already present in
                 `existing_repo_ids` or `skip_repo_ids` (from kwargs) are skipped.
-            page_size: Optional override for the page size.
+            page_size: Optional override for the Hub API page size (1-100).
             **kwargs: Supports `skip_repo_ids` (Iterable[str]) to skip repos in
                 addition to the constructor-level cache.
         """
 
-        skip_repo_ids = set(self._existing_repo_ids)
-        skip_repo_ids.update(kwargs.get("skip_repo_ids", []))
+        skip_content_hashes = set(self._existing_content_hashes)
+        skip_content_hashes.update(filter(None, kwargs.get("skip_content_hashes", [])))
 
         max_docs_raw = kwargs.get("max_docs")
-        max_docs: Optional[int] = None
+        target_successes: Optional[int] = None
         if max_docs_raw is not None:
             try:
                 candidate = int(max_docs_raw)
             except (TypeError, ValueError):
                 candidate = None
             if candidate is not None and candidate > 0:
-                max_docs = candidate
+                target_successes = candidate
+        elif self.target_repo_count is not None:
+            target_successes = self.target_repo_count
+
+        baseline_successes = 0 if force else self._baseline_content_count
+        if target_successes is not None and baseline_successes >= target_successes:
+            self.logger.info(
+                "[modelscope.fetch] baseline=%s already meets target=%s; skipping fetch",
+                baseline_successes,
+                target_successes,
+            )
+            return
 
         seen_repo_ids: set[str] = set()
         current_page = 1
-        effective_page_size = page_size if page_size is not None else self.page_size
-        yielded_total = 0
+        effective_page_size = page_size if page_size is not None else self.api_page_size
+        if effective_page_size is None:
+            effective_page_size = 100
+        effective_page_size = max(1, min(int(effective_page_size), 100))
+        yielded_total = 0  # successful README fetches
+        total_count: Optional[int] = None
 
-        headers = dict(self._base_headers)
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, headers=headers) as client:
-            await self._warmup_session(client)
-            csrf_token = client.cookies.get("csrf_token")
-            if csrf_token:
-                self._base_headers["X-CSRF-TOKEN"] = csrf_token
-            while True:
-                payload = self._make_payload(page_number=current_page, page_size=effective_page_size)
-                response_json = await self._request_page(client, payload, current_page)
-                items = self._extract_model_entries(response_json)
-                if not items:
-                    self.logger.info(
-                        "[modelscope.fetch] stopping at page=%s (no items returned)", current_page
-                    )
-                    break
-
-                yielded_on_page = 0
-                download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
-
-                for idx, (owner, name, raw_item) in enumerate(items):
-                    repo_id = f"models:{owner}/{name}"
-                    if repo_id in seen_repo_ids:
-                        continue
-                    seen_repo_ids.add(repo_id)
-
-                    if not force and repo_id in skip_repo_ids:
-                        continue
-
-                    locator = SourceLocator(
-                        source_type=SourceType.MODELS,
-                        owner_repo=f"{owner}/{name}",
-                        source_url=self._build_source_url(owner, name),
-                    )
-                    task = asyncio.create_task(
-                        self._build_raw_document(
-                            client=client,
-                            owner=owner,
-                            name=name,
-                            raw_item=raw_item,
-                            locator=locator,
-                            repo_id=repo_id,
-                        )
-                    )
-                    download_tasks.append((idx, repo_id, task))
-
-                for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
-                    try:
-                        raw_document = await task
-                    except Exception as exc:  # pragma: no cover - IO failure traced via logging
-                        self.logger.debug(
-                            "[modelscope.fetch] repo=%s readme task raised err=%s",
-                            repo_id,
-                            exc,
-                        )
-                        continue
-
-                    if raw_document is None:
-                        continue
-
-                    yield raw_document
-                    yielded_on_page += 1
-                    yielded_total += 1
-
-                    if max_docs is not None and yielded_total >= max_docs:
-                        self.logger.info(
-                            "[modelscope.fetch] reached max_docs=%s, stopping",
-                            max_docs,
-                        )
-                        return
-
+        while True:
+            entries, page_total_count = await asyncio.to_thread(
+                self._list_models_page_with_retry,
+                current_page,
+                effective_page_size,
+            )
+            if total_count is None:
+                total_count = page_total_count
+            if not entries:
                 self.logger.info(
-                    "[modelscope.fetch] page=%s yielded=%s (total seen=%s)",
+                    "[modelscope.fetch] stopping at page=%s (no items returned)",
                     current_page,
-                    yielded_on_page,
-                    len(seen_repo_ids),
                 )
-                current_page += 1
+                break
+
+            yielded_on_page = 0
+            download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
+
+            for idx, (owner, name, raw_item) in enumerate(entries):
+                repo_id = f"models:{owner}/{name}"
+                if repo_id in seen_repo_ids:
+                    continue
+                seen_repo_ids.add(repo_id)
+
+                content_hash = self._compute_content_hash(repo_id)
+                if not force and content_hash in skip_content_hashes:
+                    continue
+
+                locator = SourceLocator(
+                    source_type=SourceType.MODELS,
+                    owner_repo=f"{owner}/{name}",
+                    source_url=self._build_source_url(owner, name),
+                )
+                task = asyncio.create_task(
+                    self._build_raw_document_async(
+                        owner=owner,
+                        name=name,
+                        raw_item=raw_item,
+                        locator=locator,
+                        repo_id=repo_id,
+                    )
+                )
+                download_tasks.append((idx, repo_id, task))
+
+            for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
+                try:
+                    raw_document = await task
+                except Exception as exc:
+                    self.logger.debug(
+                        "[modelscope.fetch] repo=%s readme task raised err=%s",
+                        repo_id,
+                        exc,
+                    )
+                    continue
+
+                if raw_document is None:
+                    continue
+
+                yield raw_document
+                yielded_on_page += 1
+                yielded_total += 1
+
+                total_successes = baseline_successes + yielded_total
+                if target_successes is not None and total_successes >= target_successes:
+                    self.logger.info(
+                        "[modelscope.fetch] reached target=%s (baseline=%s, new=%s)",
+                        target_successes,
+                        baseline_successes,
+                        yielded_total,
+                    )
+                    return
+
+            # Do NOT stop on failures; continue paging until we reach the
+            # requested number of successful README fetches or exhaust pages.
+
+            self.logger.info(
+                "[modelscope.fetch] page=%s yielded=%s (total seen=%s)",
+                current_page,
+                yielded_on_page,
+                len(seen_repo_ids),
+            )
+            current_page += 1
+            # If API reports a finite total, stop once we've inspected that many entries
+            # without reaching the target successes. This still honours the success-based
+            # quota by only breaking after all pages are exhausted.
+            if (
+                total_count is not None
+                and (current_page - 1) * effective_page_size >= total_count
+                and (
+                    target_successes is None
+                    or baseline_successes + yielded_total >= target_successes
+                )
+            ):
+                break
+
+        if target_successes is not None and baseline_successes + yielded_total < target_successes:
+            self.logger.warning(
+                "[modelscope.fetch] exhausted available pages: baseline=%s new=%s target=%s",
+                baseline_successes,
+                yielded_total,
+                target_successes,
+            )
 
     async def process(
         self,
@@ -275,46 +310,34 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             "Ingest stage delegated to SqliteChromaIngestor via IngestionRunner."
         )
 
-    def _make_payload(self, *, page_number: int, page_size: Optional[int]) -> Dict[str, object]:
-        payload: Dict[str, object] = {
-            "PageNumber": page_number,
-            "SortBy": self.sort_by,
-            "Target": self.target,
-            "SingleCriterion": [],
-            "Criterion": [],
-        }
-        if page_size is not None:
-            payload["PageSize"] = page_size
-        return payload
-
-    def _build_user_agent(self) -> str:
-        return (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_3_1) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/115.0.0.0 Safari/537.36"
-        )
-
-    async def _warmup_session(self, client: httpx.AsyncClient) -> None:
-        try:
-            await client.get("https://modelscope.cn/", timeout=self.timeout)
-        except httpx.HTTPError:
-            self.logger.debug("[modelscope.fetch] warmup request failed", exc_info=True)
-        try:
-            await client.get("https://modelscope.cn/models", timeout=self.timeout)
-        except httpx.HTTPError:
-            self.logger.debug("[modelscope.fetch] warmup models request failed", exc_info=True)
-
-    async def _build_raw_document(
+    async def _build_raw_document_async(
         self,
         *,
-        client: httpx.AsyncClient,
         owner: str,
         name: str,
         raw_item: Dict[str, object],
         locator: SourceLocator,
         repo_id: str,
     ) -> Optional[RawDocument]:
-        readme_text, readme_url = await self._fetch_readme_text(client, owner, name)
+        await asyncio.sleep(random.uniform(*self.delay_range))
+        return await asyncio.to_thread(
+            self._build_raw_document_sync,
+            owner,
+            name,
+            raw_item,
+            locator,
+            repo_id,
+        )
+
+    def _build_raw_document_sync(
+        self,
+        owner: str,
+        name: str,
+        raw_item: Dict[str, object],
+        locator: SourceLocator,
+        repo_id: str,
+    ) -> Optional[RawDocument]:
+        readme_text, readme_url = self._fetch_readme_text_sync(owner, name, raw_item)
         if readme_text is None:
             self.logger.debug(
                 "[modelscope.fetch] skip repo=%s (no README found)",
@@ -332,58 +355,6 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             fetched_at=datetime.now(timezone.utc),
             content_hash=content_hash,
         )
-
-    async def _request_page(
-        self,
-        client: httpx.AsyncClient,
-        payload: Dict[str, object],
-        page_number: int,
-    ) -> Dict[str, object]:
-        backoff = self.initial_backoff
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = await client.put(self.endpoint, headers=self._base_headers, json=payload)
-            except httpx.HTTPError as exc:
-                if attempt == self.max_retries:
-                    raise
-                wait_time = backoff * (1.0 + random.random())
-                self.logger.warning(
-                    "[modelscope.fetch] HTTP error on page=%s attempt=%s err=%s; retrying in %.2fs",
-                    page_number,
-                    attempt,
-                    exc,
-                    wait_time,
-                )
-                await asyncio.sleep(wait_time)
-                backoff *= self.backoff_factor
-                continue
-
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-                    raise RuntimeError(
-                        f"Unable to decode JSON for page {page_number}: {exc}"
-                    ) from exc
-
-            if response.status_code in self.RETRY_STATUS:
-                if attempt == self.max_retries:
-                    response.raise_for_status()
-                wait_time = backoff * (1.0 + random.random())
-                self.logger.warning(
-                    "[modelscope.fetch] %s on page=%s attempt=%s; retrying in %.2fs",
-                    response.status_code,
-                    page_number,
-                    attempt,
-                    wait_time,
-                )
-                await asyncio.sleep(wait_time)
-                backoff *= self.backoff_factor
-                continue
-
-            response.raise_for_status()
-
-        raise RuntimeError(f"Exhausted retries for page {page_number}")
 
     def _extract_model_entries(
         self,
@@ -413,13 +384,13 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             if not isinstance(raw_item, dict):
                 continue
             owner = (
-                raw_item.get("Owner")
+                raw_item.get("Path")
+                or raw_item.get("Owner")
                 or raw_item.get("OwnerName")
                 or raw_item.get("UserName")
                 or raw_item.get("Publisher")
                 or raw_item.get("OrganizationName")
                 or raw_item.get("User")
-                or raw_item.get("UserNickName")
             )
             if not owner:
                 organization = raw_item.get("Organization")
@@ -429,6 +400,8 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                         or organization.get("FullName")
                         or organization.get("DisplayName")
                     )
+            if not owner:
+                owner = raw_item.get("CreatedBy")
             name = raw_item.get("ModelName") or raw_item.get("Name")
             if not owner or not name:
                 continue
@@ -442,8 +415,118 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     def _build_source_url(self, owner: str, name: str) -> str:
         return f"https://modelscope.cn/models/{owner}/{name}"
 
-    def _build_readme_url(self, owner: str, name: str) -> str:
-        return f"https://modelscope.cn/models/{owner}/{name}/resolve/master/README.md"
+    def _list_models_page_with_retry(
+        self,
+        page_number: int,
+        page_size: int,
+    ) -> Tuple[List[Tuple[str, str, Dict[str, object]]], int]:
+        backoff = self.initial_backoff
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                data = self._hub_api.list_models(
+                    owner_or_group="",
+                    page_number=page_number,
+                    page_size=page_size,
+                )
+                total = int(data.get("TotalCount") or 0)
+                container = {"Data": {"Models": data.get("Models") or []}}
+                entries = self._extract_model_entries(container)
+                return entries, total
+            except Exception as exc:
+                if attempt == self.max_retries:
+                    raise
+                wait_time = backoff * (1.0 + random.random())
+                self.logger.warning(
+                    "[modelscope.fetch] list_models page=%s attempt=%s err=%s; retrying in %.2fs",
+                    page_number,
+                    attempt,
+                    exc,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+                backoff *= self.backoff_factor
+        raise RuntimeError(f"Unable to list models for page {page_number}")
+
+    def _fetch_readme_text_sync(
+        self,
+        owner: str,
+        name: str,
+        raw_item: Dict[str, object],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        repo_id = f"{owner}/{name}"
+
+        api_readme = raw_item.get("ReadMeContent") if isinstance(raw_item, dict) else None
+        if isinstance(api_readme, str) and api_readme.strip():
+            text = api_readme.strip()
+            return text, None
+
+        try:
+            revision = self._hub_api.get_valid_revision(
+                repo_id,
+                endpoint=self._hub_api.endpoint,
+            )
+        except Exception as exc:
+            self.logger.debug(
+                "[modelscope.fetch] repo=%s failed to resolve revision: %s",
+                repo_id,
+                exc,
+            )
+            return None, None
+
+        try:
+            files = self._hub_api.get_model_files(
+                model_id=repo_id,
+                revision=revision,
+                recursive=True,
+                endpoint=self._hub_api.endpoint,
+            )
+        except Exception as exc:
+            self.logger.debug(
+                "[modelscope.fetch] repo=%s failed to list files: %s",
+                repo_id,
+                exc,
+            )
+            return None, None
+
+        readme_entry = None
+        for file_meta in files:
+            if not isinstance(file_meta, dict):
+                continue
+            path = str(file_meta.get("Path") or "").strip()
+            if path.lower() == "readme.md":
+                readme_entry = file_meta
+                break
+        if readme_entry is None:
+            return None, None
+
+        download_url = get_file_download_url(
+            repo_id=repo_id,
+            file_path=readme_entry["Path"],
+            revision=revision,
+            endpoint=self._hub_api.endpoint,
+        )
+        headers = self._hub_api.builder_headers(dict(self._hub_api.headers))
+        headers["Accept"] = "text/plain, */*"
+        try:
+            resp = self._hub_api.session.get(
+                download_url,
+                headers=headers,
+                cookies=ModelScopeConfig.get_cookies(),
+                timeout=self.readme_timeout,
+            )
+            resp.raise_for_status()
+        except requests_exc.RequestException as exc:
+            self.logger.debug(
+                "[modelscope.fetch] repo=%s failed to download README: %s",
+                repo_id,
+                exc,
+            )
+            return None, None
+
+        text = resp.text.strip()
+        if not text:
+            return None, None
+        return text, download_url
 
     def _build_payload_dict(
         self,
@@ -473,54 +556,6 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     def _compute_content_hash(self, repo_id: str) -> str:
         """ModelScope 模型库使用 repo_id 作为稳定的 content_hash."""
         return repo_id
-
-    async def _fetch_readme_text(
-        self,
-        client: httpx.AsyncClient,
-        owner: str,
-        name: str,
-    ) -> Tuple[Optional[str], Optional[str]]:
-        base_url = f"https://modelscope.cn/models/{owner}/{name}/resolve/master"
-        candidates = list(self.README_CANDIDATES)
-        seen_urls = set()
-        for candidate in candidates:
-            url = f"{base_url}/{candidate}"
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-            try:
-                headers = dict(self._base_headers)
-                headers["Accept"] = "text/plain, */*"
-                resp = await client.get(
-                    url,
-                    headers=headers,
-                    timeout=self.timeout,
-                    follow_redirects=True,
-                )
-            except httpx.HTTPError as exc:
-                self.logger.debug(
-                    "[modelscope.fetch] error fetching README url=%s err=%s",
-                    url,
-                    exc,
-                )
-                continue
-
-            if resp.status_code == 404:
-                continue
-
-            if resp.status_code >= 400:
-                self.logger.debug(
-                    "[modelscope.fetch] non-success README status url=%s status=%s",
-                    url,
-                    resp.status_code,
-                )
-                continue
-
-            text = resp.text.strip()
-            if not text:
-                continue
-            return text, str(resp.url)
-        return None, None
 
     def _make_chunk_uuid(self, repo_id: str, content_hash: str, index: int) -> str:
         seed = f"{repo_id}:{content_hash}:{index}"

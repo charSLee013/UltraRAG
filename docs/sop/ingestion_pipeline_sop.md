@@ -78,7 +78,7 @@ class StageMetrics:
 
 @dataclass(frozen=True)
 class PipelineRuntimeLimits:
-    max_workers: int = 8                  # 并行“按文档”工人数量
+    max_workers: int = 32                 # 并行“按文档”工人数量
     max_embed_concurrency: int = 32       # 嵌入 API 同时在飞请求数
     chunk_max_size: int = 32_768          # Split 生成单 chunk 的最大字符数
 ```
@@ -128,6 +128,19 @@ class BaseIngestionPipeline(abc.ABC):
 - **必须记录失败与警告**：即便采取“超时后放弃”策略，也要在日志与 StageMetrics（`warnings`、`dropped` 等字段）中留下信息，便于后续补抓或复现；严禁静默丢弃。
 - **受 Runner 调度约束**：Fetch 内的任何并发实现都必须与 Runner 的 `max_workers` 配合，不得私下创建无限线程/后台池；推荐通过受控的 `asyncio.Semaphore` 或令牌桶实现。
 - **新增或修改并发策略前须先更新本 SOP**：遵循 Specification-First，先在文档里说明目标、参数、边界，再进入编码阶段。
+
+#### 3.1.1 ModelScope 官方模型库 API 规范
+
+- **唯一通道（仅适用于“模型库：https://modelscope.cn/models”这一来源）**：获取模型列表与 README 元数据必须复用官方 Hub API 的行为（等价于 `HubApi.list_models`、`HubApi.get_model_files`、`HubApi.get_model` 的请求），即便在代码中不直接依赖 `HubApi` 类，也必须构造相同的 HTTP 调用（路径、Body、Header、Cookie、超时/重试策略）。禁止重新访问旧的 `/dolphin/models` 或手写 README URL。
+- **必备 Header**：每次请求至少包含 `User-Agent`、`Content-Type: application/json`（或 `text/plain` 对 README 下载）、`X-Request-ID`（随机 UUID）。如需认证，沿用 ModelScopeConfig 提供的 cookie/token。
+- **README 下载**：仅允许使用 API 返回的 `ReadMeContent` 字段或 `README.md` 文件元数据生成的下载链接；不得再维护多种候选文件名或兜底抓取逻辑。缺失时跳过并在日志记录。
+- **节流策略**：在 API 返回的单页数据上应用受控并发（推荐 Semaphore 16~32），并为每个 README 请求引入 0.1~3.5 秒随机延迟以减轻服务器压力；单次请求超时仍保持 60 秒。
+- **失败处理**：`list_models` 级别出现 429/5xx 时以指数退避整页重试；单个 README 下载失败则记录日志并跳过，不回滚整页；不会因为连续失败而提前停止。本轮成功的模型不得重复抓取。
+- **去重**：保持 `seen_repo_ids` / 数据库去重逻辑，若内容未变（依据 `content_hash`），则直接跳过，避免重复访问。
+- **基线同步**：运行器在调度前会读取 SQLite `repo` 表中的历史 `content_hash`，并将其作为基线集合注入来源；来源必须在每次成功生成 `RawDocument` 且完成 ingest 后，把本次 `content_hash` 写回集合，以便后续配额判断始终以“既有 content_hash + 本轮新增 content_hash”为准。（ModelScope source 的 `content_hash` 等同于 `repo_id`，但架构层面的去重逻辑依旧围绕 `content_hash` 展开。）
+- **抓取配额（严格定义）**：`MODELSCOPE_MODEL_SIZE`（优先级最高）或 `MODELSCOPE_PAGE_SIZE` 声明“本轮结束后需保证 SQLite/Chroma 中存在的 README 成功数量”，计数口径为成功写入的 `content_hash` 总数。运行器提供的基线 `content_hash` 集合必须被来源纳入配额判断，仅当“基线 + 本轮新增 `content_hash`”仍不足时继续抓取。失败/跳过不计入且不触发提前停止；仅当成功计数（含基线）达到阈值或 Exhaust 页数时停止。Hub API 的 `page_size` 会根据差额目标自动取 `min(差额, 100)`，未设置时视为不限量（仍按 100 拉取）。
+
+> ⚠️ 其它官方渠道（Docs / Learn / GitHub / Datasets / Studios / MCP / AIGC 等）同样遵循“优先官方 API/页面”的原则，但各自接口与结构不同，必须在编码前先在本 SOP 中补充对应的策略与合规说明，严禁直接沿用模型库的 Hub API 调用方式，以免引入噪声或合规风险。
 
 ## 4. 运行器（Runner）与并发编排
 
@@ -255,7 +268,7 @@ def _group_for_api(drafts: list[ChunkDraft], chunk_max_size: int) -> list[list[C
    - 所有日志需包含 `repo_id`、`content_hash` 与 `chunk_uuid`，确保重放与排错。
 
 **默认参数建议**（如来源无特殊要求，按下列配置）：
-- `PipelineRuntimeLimits.max_workers = 8`（可根据 CPU/IO 调整，但需确保嵌入仍为瓶颈）。
+- `PipelineRuntimeLimits.max_workers = 32`（可根据 CPU/IO 调整，但仍需确保嵌入或上游限额是瓶颈）。
 - `PipelineRuntimeLimits.max_embed_concurrency = 512`，并使用信号量 + AIMD（失败减半、成功加 1）。
 - `PipelineRuntimeLimits.chunk_max_size = 32_768` 字符，与目标嵌入 API 上限同步。
 - 嵌入批量建议控制在 32 条以内，具体由 `process` 内部实现决定。
@@ -342,7 +355,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         await ingestor.ingest(records, raw)
 
 
-limits = PipelineRuntimeLimits(max_workers=8, max_embed_concurrency=32, chunk_max_size=32_768)
+limits = PipelineRuntimeLimits(max_workers=32, max_embed_concurrency=32, chunk_max_size=32_768)
 pipeline = ModelScopeModelsPipeline(
     client=modelscope_client,
     repo_store=sqlite_repo_store,
