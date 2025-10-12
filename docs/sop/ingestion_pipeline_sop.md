@@ -62,7 +62,7 @@ class ChunkRecord:
     chunk_uuid: uuid.UUID   # 与 Chroma 向量 id 同步
     repo_id: str
     content_hash: str
-    index: int
+    chunk_index: int
     text: str
     locator: SourceLocator
     embedding: list[float]
@@ -85,7 +85,7 @@ class PipelineRuntimeLimits:
 
 - `SourceLocator`：唯一的来源定位键，贯穿所有阶段与向量元数据。 
 - `repo_id`：来源级主键，可按需重写（例如模型分支差异化）；必须与 SQLite `repo.repo_id` 一致。 
-- `content_hash`：由获取或专用策略生成，用于识别文档内容变化（可使用摘要、版本号等函数）。 
+- `content_hash`：由获取或专用策略生成，用于识别文档内容变化（例如对正文取摘要或版本号），**尽可能保持稳定**。每个来源可以自定义策略：比如 ModelScope 模型库（https://modelscope.cn/models）就将 `content_hash` 显式设为 `repo_id`，以避免 README 下载 URL 的临时 `auth_key` 导致哈希抖动。 
 - `ChunkDraft.index`：切割阶段生成的稳定序号，用于 deterministic 重放与批量删除。 
 - `ChunkRecord.chunk_uuid`：由标签阶段统一生成，作为 SQLite `chunks` 主键与 Chroma `id`。 
 - `StageMetrics`：统计各阶段的吞吐与异常，便于监控与验收。
@@ -114,12 +114,20 @@ class BaseIngestionPipeline(abc.ABC):
     async def ingest(
         self,
         records: list[ChunkRecord],
+        raw: RawDocument,
     ) -> None:
         ...  # SQLite 事务替换 + Chroma delete/upsert（带重试/补偿）
 ```
 
 - 阶段顺序固定：**Fetch（含去重）→ Process（Clean→Split→Embed→Tag）→ Ingest**。 
 - 抽象基类只定义业务契约，不承担运行参数或并发配置。
+
+### 3.1 Fetch 阶段的性能约束
+
+- **吞吐优先但需可控**：Fetch 应在满足业务完整性的前提下尽可能高效。允许来源实现有限的并发抓取策略（例如 README 下载异步化），但必须在本 SOP 中明确：最大并发、超时、重试/退避、失败记录方式。
+- **必须记录失败与警告**：即便采取“超时后放弃”策略，也要在日志与 StageMetrics（`warnings`、`dropped` 等字段）中留下信息，便于后续补抓或复现；严禁静默丢弃。
+- **受 Runner 调度约束**：Fetch 内的任何并发实现都必须与 Runner 的 `max_workers` 配合，不得私下创建无限线程/后台池；推荐通过受控的 `asyncio.Semaphore` 或令牌桶实现。
+- **新增或修改并发策略前须先更新本 SOP**：遵循 Specification-First，先在文档里说明目标、参数、边界，再进入编码阶段。
 
 ## 4. 运行器（Runner）与并发编排
 
@@ -158,6 +166,9 @@ class IngestionRunner:
         await asyncio.gather(*workers)
         return StageMetrics(stage="run", total_in=0, total_out=0)
 
+    # 注：上述返回示例仅演示结构；真实实现需累积并返回文档与记录计数
+    # （例如 total_in/total_out），以及并发轨迹等观测指标。
+
     async def _produce_docs(self) -> None:
         async for raw in self.pipeline.fetch(force=self.fetch_force, **self.fetch_kwargs):
             await self.q_docs.put(raw)
@@ -173,7 +184,7 @@ class IngestionRunner:
                     chunk_max_size=self.limits.chunk_max_size,
                     embed=self._embed_with_limits,
                 )
-                await self.pipeline.ingest(records)
+                await self.pipeline.ingest(records, raw)
             finally:
                 self.q_docs.task_done()
 
@@ -245,7 +256,7 @@ def _group_for_api(drafts: list[ChunkDraft], chunk_max_size: int) -> list[list[C
 
 **默认参数建议**（如来源无特殊要求，按下列配置）：
 - `PipelineRuntimeLimits.max_workers = 8`（可根据 CPU/IO 调整，但需确保嵌入仍为瓶颈）。
-- `PipelineRuntimeLimits.max_embed_concurrency = 32`，并使用信号量 + AIMD（失败减半、成功加 1）。
+- `PipelineRuntimeLimits.max_embed_concurrency = 512`，并使用信号量 + AIMD（失败减半、成功加 1）。
 - `PipelineRuntimeLimits.chunk_max_size = 32_768` 字符，与目标嵌入 API 上限同步。
 - 嵌入批量建议控制在 32 条以内，具体由 `process` 内部实现决定。
 ## 6. SQLite 与 Chroma 结构
@@ -286,7 +297,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         repo_store: RepoStateStore,
         doc_store: DocFingerprintStore,
         sqlite_db: SqliteConnection,
-        chroma: ChromaClient, `
+        chroma: ChromaClient,
         limits: PipelineRuntimeLimits,
     ) -> None:
         self.client = client
@@ -325,9 +336,10 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     async def ingest(
         self,
         records: list[ChunkRecord],
+        raw: RawDocument,
     ) -> None:
         ingestor = SqliteChromaIngestor(self.sqlite_db, self.chroma)
-        await ingestor.ingest(records)
+        await ingestor.ingest(records, raw)
 
 
 limits = PipelineRuntimeLimits(max_workers=8, max_embed_concurrency=32, chunk_max_size=32_768)
@@ -339,12 +351,11 @@ pipeline = ModelScopeModelsPipeline(
     chroma=chroma_client,
     limits=limits,
 )
-embed_client = AsyncEmbeddingClient(model="bge-m3", rate_limiter=limiter)
 
 runner = IngestionRunner(
     pipeline,
     limits,
-    embed_func=embed_client.embed,
+    embed_func=embed_httpx,             # 调用 ingestion_pipeline.embed.adapters.embed_httpx
     fetch_kwargs={"page_size": 100},
     metrics=PromMetricsCollector(...),
 )
@@ -353,9 +364,10 @@ metrics = asyncio.run(runner.run())
 ```
 
 - 子类通过实现 `fetch`/`process`/`ingest` 方法与共享的 `limits` 复用 Runner 的并发/背压策略。 
-- `SqliteChromaIngestor` 在 `ingest` 中执行“删除→写入”两段式操作，并在外部阶段处理 Chroma 删除与 upsert。 
+- `SqliteChromaIngestor` 在 `ingest` 中执行“删除→写入”两段式操作，并在外部阶段处理 Chroma 删除与 upsert`（ModelScope 场景按 `repo_id` 级别整体删除旧数据再写新数据，不再依赖 `content_hash` 过滤）`。 
 - 将 `PipelineRuntimeLimits` 同时传给 Pipeline 与 Runner，确保 Split 和 Embed 使用一致的 `chunk_max_size` 与嵌入限额。 
 - Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。
+- 嵌入适配器使用 `httpx.AsyncClient`，向 `{EMBEDDING_API_URL.rstrip('/')}/embeddings` 发送 `POST`，Body 包含 `model`、`input`（批量文本）以及可选的 `encoding_format`、`dimensions`；必须提供 `Authorization: Bearer {EMBEDDING_API_KEY}`。严格保持最小实现，避免额外封装或“自动拼路径”造成路径重复。
 
 ## 8. 实现目录建议
 
@@ -372,7 +384,7 @@ ingestion_pipeline/
 │   └── sqlite.py           # “删除→写入”两阶段 ingest 实现（可复用 chroma SOP 逻辑）
 ├── embed/
 │   ├── __init__.py
-│   └── async_client.py     # 对接嵌入 API，暴露 EmbedFn
+│   └── adapters.py         # httpx 方式调用 {EMBEDDING_API_URL}/embeddings，暴露 EmbedFn
 └── sources/
     ├── __init__.py
     ├── base.py             # 定义 fetch/process/ingest 子类合同
@@ -387,11 +399,13 @@ ingestion_pipeline/
 
 为与 `docs/sop/chroma_retriever_sop.md` 保持一致，推荐沿用相同的输出目录结构，便于后续组件共享：
 
-- SQLite：`output/modelscope_docs/sqlite/docs.sqlite`（包含 `repo`、`chunks` 两张表）。
-- Chroma：`output/modelscope_docs/chroma`（集合名推荐 `modelscope_docs`，向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`content_hash`/`chunk_index` 等字段）。
-- 日志：可将每次运行的指标/告警写入 `output/modelscope_docs/logs/`，命名规则 `run_{timestamp}.json` 或等价格式，便于审计。
+- SQLite：固定为 `output/ingestion/sqlite/docs.sqlite`（包含 `repo`、`chunks` 两张表）。**所有入库流水线必须复用这一数据库，不得为不同来源另起路径。**
+- Chroma：固定为 `output/ingestion/chroma`（集合名推荐 `ingestion_docs`，向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`repo_id`/`content_hash`/`chunk_index`/`fetched_at`）。**同样所有流水线共享该向量库，严禁分散存放。**
+- 日志：可将每次运行的指标/告警写入 `output/ingestion/logs/`，命名规则 `run_{timestamp}.json` 或等价格式，便于审计。
 
 若未来扩展其他来源，可在相同目录下按来源类型追加子目录，但 SQLite + Chroma 路径保持不变，确保原有检索器无需修改即可读取。
+
+> **注意**：新增 ingestion pipeline 时不得创建新的数据库或向量目录，务必复用上述 SQLite/Chroma 配置（通过环境变量覆盖亦需指向同一套路径），并以 Runner + Store 组件为唯一通路。
 
 ## 10. 保障措施
 
@@ -408,5 +422,24 @@ ingestion_pipeline/
 - 保留 `RawDocument.payload` 与 `content_hash` 的映射，满足“重新抓取与验证”需求。
 
 ---
+
+## 入库来源（覆盖范围）
+
+为保证知识覆盖并减少偏置，入库来源限定为 ModelScope 官方/社区面向开发者的文档与仓库页面（仅说明类文本）：
+
+- 文档中心（魔搭平台功能介绍）：https://www.modelscope.cn/docs/overview
+- 研习社（模型解读与最佳实践）：https://modelscope.cn/learn
+- GitHub（魔搭开源项目技术类文档）：https://github.com/modelscope
+- 模型库：https://modelscope.cn/models
+- 数据集：https://modelscope.cn/datasets
+- 创空间应用：https://modelscope.cn/studios
+- MCP：https://www.modelscope.cn/mcp
+- AIGC 生图和训练：https://www.modelscope.cn/aigc
+
+约束：
+- 仅抓取 README/CHANGELOG/docs/**/*.md/.rst/.txt 等说明类文本；不下载模型二进制与非说明文件。
+- 单条文档大小上限与切片/嵌入速率受本 SOP 对应环境变量与限流策略约束。
+
+
 
 > 本 SOP 为数据入库范式的唯一事实源。所有来源接入、清洗策略、并发策略或事务约束的变更，必须先修订本文件再实施。

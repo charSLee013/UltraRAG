@@ -20,9 +20,16 @@ Follow standard Python 3.11 guidelines: four-space indents, double quotes for us
 ## Testing Guidelines
 Author tests with `pytest`; place them in `tests/` mirroring the package path (`tests/servers/test_router.py`). Use descriptive `test_<scenario>_<expected>()` names and fixture files in `data/` where appropriate. Run `pytest` locally before opening a pull request, and include CLI smoke-tests (`ultrarag run ...`) in your manual checklist when adding new pipelines or servers. Target meaningful coverage of branching logic, especially MCP tool dispatch and error handling.
 
+## Performance & Observability Expectations
+- Treat吞吐量和QPS为一等指标：在设计新 pipeline/接口时，先评估目标速率与上游限额（API 并发、服务超时），并让规范文件（SOP）明确写出并发上限、退避策略与日志要求。
+- 在不牺牲数据质量的前提下压榨速度：允许增加 fetch/处理并发，但必须精准记录失败与超时，确保可追溯、可补跑，严禁“静默忽略”异常。
+- 任何影响速率/质量的改动都遵循 Specification-First：先在 SOP 中写清楚目标与安全阀，再着手编码。
+- 观测优先：新增并发或节流机制时同步补充指标（StageMetrics、日志、Prometheus 埋点等），让其他工程师能快速定位瓶颈与故障。
+
 
 ## Retrieval Data Sources
-README ingestion writes to `output/modelscope_docs/chroma`; retriever pipelines must use `retriever_init_readme` / `retriever_search_readme`, which return README segments plus minimal metadata (`repo_author/repo_name`, with `score`; optional `clean_state`).
+- README ingestion writes to the shared stores `output/ingestion/sqlite/docs.sqlite` (SQLite) and `output/ingestion/chroma` (Chroma collection `ingestion_docs`).
+- Retriever pipelines必须使用 `retriever_init_readme` / `retriever_search_readme` 指向同一集合，只返回 `repo_author/repo_name/score`（可选 `clean_state`）。
 
 ## Search‑o1 Retrieval Neutrality & Anti‑Patterns
 To keep Search‑o1 flows neutral, reproducible, and auditable, follow these rules:
@@ -57,6 +64,9 @@ To keep Search‑o1 flows neutral, reproducible, and auditable, follow these rul
   - Any behavioral change to retrieval/loop/termination must be updated in `docs/sop/search_o1_answering_sop.md` before implementation.
 ## Specification-First Development
 Every feature or significant change must have an SOP entry under `docs/sop/` before coding begins. Treat the SOP as the single source of truth: update the spec and implementation plan first, then implement code and other artifacts strictly following the SOP. If requirements change, revise the SOP prior to any code edits.
+
+### Iron Rules
+- Never modify repository files when the user only asks for strategy, analysis, or a plan. Deliver the plan first and wait for explicit implementation instructions before changing code.
 
 ## Commit & Pull Request Guidelines
 Commit using Conventional Commits (`feat: add hybrid retriever`, `fix: guard empty query`). Keep changes scoped and reference issues in the footer when relevant. Pull requests should summarize the user-facing impact, list verification commands, and attach logs or screenshots for pipeline demos. When modifying benchmark servers, note any dataset or environment prerequisites so reviewers can reproduce results quickly.
