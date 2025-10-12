@@ -63,7 +63,6 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         self.readme_timeout = 60.0
         self.delay_range = (0.1, 3.5)
         self._existing_content_hashes = set(filter(None, existing_content_hashes or []))
-        self._baseline_content_count = len(self._existing_content_hashes)
         self.logger = logging.getLogger("ingestion.sources.modelscope_models")
 
         endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or None
@@ -79,6 +78,19 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         """Record a content_hash after a successful ingest to keep skip lists in sync."""
         if content_hash:
             self._existing_content_hashes.add(content_hash)
+
+    def estimate_total_models(self) -> Optional[int]:
+        """Return total models reported by the Hub API, or None on failure."""
+        try:
+            data = self._hub_api.list_models(owner_or_group="", page_number=1, page_size=1)
+        except Exception as exc:
+            self.logger.warning("[modelscope.fetch] failed to fetch total count: %s", exc)
+            return None
+        total = data.get("TotalCount")
+        try:
+            return int(total)
+        except (TypeError, ValueError):
+            return None
 
     async def fetch(
         self,
@@ -109,17 +121,8 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                 candidate = None
             if candidate is not None and candidate > 0:
                 target_successes = candidate
-        elif self.target_repo_count is not None:
+        elif self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
-
-        baseline_successes = 0 if force else self._baseline_content_count
-        if target_successes is not None and baseline_successes >= target_successes:
-            self.logger.info(
-                "[modelscope.fetch] baseline=%s already meets target=%s; skipping fetch",
-                baseline_successes,
-                target_successes,
-            )
-            return
 
         seen_repo_ids: set[str] = set()
         current_page = 1
@@ -127,7 +130,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         if effective_page_size is None:
             effective_page_size = 100
         effective_page_size = max(1, min(int(effective_page_size), 100))
-        yielded_total = 0  # successful README fetches
+        yielded_total = 0  # successful README fetches in this run
         total_count: Optional[int] = None
 
         while True:
@@ -191,14 +194,12 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                 yield raw_document
                 yielded_on_page += 1
                 yielded_total += 1
+                skip_content_hashes.add(raw_document.content_hash)
 
-                total_successes = baseline_successes + yielded_total
-                if target_successes is not None and total_successes >= target_successes:
+                if target_successes is not None and yielded_total >= target_successes:
                     self.logger.info(
-                        "[modelscope.fetch] reached target=%s (baseline=%s, new=%s)",
+                        "[modelscope.fetch] reached per-run quota=%s, stopping",
                         target_successes,
-                        baseline_successes,
-                        yielded_total,
                     )
                     return
 
@@ -215,20 +216,12 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             # If API reports a finite total, stop once we've inspected that many entries
             # without reaching the target successes. This still honours the success-based
             # quota by only breaking after all pages are exhausted.
-            if (
-                total_count is not None
-                and (current_page - 1) * effective_page_size >= total_count
-                and (
-                    target_successes is None
-                    or baseline_successes + yielded_total >= target_successes
-                )
-            ):
+            if total_count is not None and (current_page - 1) * effective_page_size >= total_count:
                 break
 
-        if target_successes is not None and baseline_successes + yielded_total < target_successes:
+        if target_successes is not None and yielded_total < target_successes:
             self.logger.warning(
-                "[modelscope.fetch] exhausted available pages: baseline=%s new=%s target=%s",
-                baseline_successes,
+                "[modelscope.fetch] exhausted available pages before meeting quota: yielded=%s target=%s",
                 yielded_total,
                 target_successes,
             )

@@ -137,8 +137,8 @@ class BaseIngestionPipeline(abc.ABC):
 - **节流策略**：在 API 返回的单页数据上应用受控并发（推荐 Semaphore 16~32），并为每个 README 请求引入 0.1~3.5 秒随机延迟以减轻服务器压力；单次请求超时仍保持 60 秒。
 - **失败处理**：`list_models` 级别出现 429/5xx 时以指数退避整页重试；单个 README 下载失败则记录日志并跳过，不回滚整页；不会因为连续失败而提前停止。本轮成功的模型不得重复抓取。
 - **去重**：保持 `seen_repo_ids` / 数据库去重逻辑，若内容未变（依据 `content_hash`），则直接跳过，避免重复访问。
-- **基线同步**：运行器在调度前会读取 SQLite `repo` 表中的历史 `content_hash`，并将其作为基线集合注入来源；来源必须在每次成功生成 `RawDocument` 且完成 ingest 后，把本次 `content_hash` 写回集合，以便后续配额判断始终以“既有 content_hash + 本轮新增 content_hash”为准。（ModelScope source 的 `content_hash` 等同于 `repo_id`，但架构层面的去重逻辑依旧围绕 `content_hash` 展开。）
-- **抓取配额（严格定义）**：`MODELSCOPE_MODEL_SIZE`（优先级最高）或 `MODELSCOPE_PAGE_SIZE` 声明“本轮结束后需保证 SQLite/Chroma 中存在的 README 成功数量”，计数口径为成功写入的 `content_hash` 总数。运行器提供的基线 `content_hash` 集合必须被来源纳入配额判断，仅当“基线 + 本轮新增 `content_hash`”仍不足时继续抓取。失败/跳过不计入且不触发提前停止；仅当成功计数（含基线）达到阈值或 Exhaust 页数时停止。Hub API 的 `page_size` 会根据差额目标自动取 `min(差额, 100)`，未设置时视为不限量（仍按 100 拉取）。
+- **基线同步**：运行器在调度前会读取 SQLite `repo` 表中的历史 `content_hash`，作为基线集合注入来源；来源必须在完成 ingest 后把当次成功的 `content_hash` 追加回集合，确保下一批次继续沿用真实库存（避免重复抓取）。ModelScope source 当前令 `content_hash == repo_id`，但框架层契约仍以 `content_hash` 为准。
+- **抓取配额（严格定义）**：`MODELSCOPE_MODEL_SIZE` 控制“本轮最多成功抓取多少个 README”（以本次新增的 `content_hash` 计），值 ≤0 表示不限量。来源在统计是否达标时只计算本轮新增的成功数，基线集合仅用于去重。失败/跳过不计入成功数；若枚举所有页面仍未达到配额，必须记录告警。有限配额时，Hub API 的 `page_size` 建议取 `min(配额差值, 100)`；不限量则维持 100。
 
 > ⚠️ 其它官方渠道（Docs / Learn / GitHub / Datasets / Studios / MCP / AIGC 等）同样遵循“优先官方 API/页面”的原则，但各自接口与结构不同，必须在编码前先在本 SOP 中补充对应的策略与合规说明，严禁直接沿用模型库的 Hub API 调用方式，以免引入噪声或合规风险。
 

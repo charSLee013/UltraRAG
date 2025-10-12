@@ -7,9 +7,15 @@ import signal
 import sys
 import time
 from contextlib import suppress
+from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from tqdm import tqdm
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from ingestion_pipeline.embed.adapters import get_default_embed_fn
 from ingestion_pipeline.limits import PipelineRuntimeLimits
@@ -63,7 +69,7 @@ async def _run_ingestion() -> None:
 
     target_models = _int_env("MODELSCOPE_MODEL_SIZE", 0)
     if target_models <= 0:
-        target_models = _int_env("MODELSCOPE_PAGE_SIZE", 5)
+        target_models = None
 
     sqlite_store = SQLiteStore()
     chroma_store = ChromaStore()
@@ -78,14 +84,23 @@ async def _run_ingestion() -> None:
         raise RuntimeError(f"Failed to enumerate existing repo ids: {exc}") from exc
 
     pipeline = ModelScopeModelsPipeline(
-        page_size=target_models or None,
+        page_size=target_models,
         existing_content_hashes=existing_content_hashes,
     )
     embed_fn = get_default_embed_fn()
 
     limits = PipelineRuntimeLimits()
 
-    progress = tqdm(desc="ModelScope ingest", unit="repo", leave=True)
+    total_hint = pipeline.estimate_total_models()
+    total_for_run: Optional[int]
+    if target_models is not None and target_models > 0:
+        total_for_run = target_models
+        if total_hint:
+            total_for_run = min(total_hint, target_models)
+    else:
+        total_for_run = total_hint
+
+    progress = tqdm(desc="ModelScope ingest", unit="repo", leave=True, total=total_for_run)
     totals = {"repos": 0, "chunks": 0}
 
     def ingest_with_progress(records, raw):
