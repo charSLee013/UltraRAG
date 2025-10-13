@@ -8,9 +8,12 @@ from html.parser import HTMLParser
 from typing import AsyncGenerator, Dict, Iterable, List, Optional, Tuple
 
 import httpx
+import logging
 
 USER_AGENT = "UltraRAG-Community-Agent/0.1"
 DEFAULT_ENDPOINT = "https://modelscope.cn"
+
+logger = logging.getLogger("ingestion.modelscope_client")
 
 
 class HTMLStripper(HTMLParser):
@@ -182,6 +185,7 @@ class ModelScopeClient:
     async def _datasets_page(self, page_number: int) -> Dict[str, object]:
         assert self._client is not None
         params = {"PageNumber": page_number, "PageSize": self.dataset_page_size}
+        logger.info("[modelscope_client] fetch datasets page=%s", page_number)
         resp = await self._request("GET", f"{self.endpoint}/api/v1/dolphin/datasets", params=params)
         resp.raise_for_status()
         return resp.json()
