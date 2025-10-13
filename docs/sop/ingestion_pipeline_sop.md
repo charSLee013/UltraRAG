@@ -75,6 +75,8 @@ class StageMetrics:
     dropped: int = 0
     warnings: list[str] = field(default_factory=list)
     sample_locators: list[SourceLocator] = field(default_factory=list)
+    writer_items: int = 0
+    max_queue_depth: int = 0
 
 @dataclass(frozen=True)
 class PipelineRuntimeLimits:
@@ -376,11 +378,16 @@ metrics = asyncio.run(runner.run())
 ```
 ```
 
-- 子类通过实现 `fetch`/`process`/`ingest` 方法与共享的 `limits` 复用 Runner 的并发/背压策略。 
-- `SqliteChromaIngestor` 在 `ingest` 中执行“删除→写入”两段式操作，并在外部阶段处理 Chroma 删除与 upsert`（ModelScope 场景按 `repo_id` 级别整体删除旧数据再写新数据，不再依赖 `content_hash` 过滤）`。 
-- 将 `PipelineRuntimeLimits` 同时传给 Pipeline 与 Runner，确保 Split 和 Embed 使用一致的 `chunk_max_size` 与嵌入限额。 
-- Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。
+- 子类通过实现 `fetch`/`process`/`ingest` 方法，与共享的 `limits` 复用 Runner 的并发/背压策略。
+- Runner 仅保留一个集中写入协程：所有 worker 将 `(records, raw)` 放入新建的 `AsyncQueue`，写入器按照入队顺序依次调用 `SqliteChromaIngestor.ingest()`；完成后才取下一条。**禁止任何代码绕过队列直接写入存储。**
+- `PipelineRuntimeLimits` 仍只维护并发和分片大小等核心参数；队列容量固定为 `2 * max_workers`，无额外开关或重试策略。
+- Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。写入器始终以“单条立即写”方式运行，不存在批次阈值或可配置 flush 行为。
 - 嵌入适配器使用 `httpx.AsyncClient`，向 `{EMBEDDING_API_URL.rstrip('/')}/embeddings` 发送 `POST`，Body 包含 `model`、`input`（批量文本）以及可选的 `encoding_format`、`dimensions`；必须提供 `Authorization: Bearer {EMBEDDING_API_KEY}`。严格保持最小实现，避免额外封装或“自动拼路径”造成路径重复。
+
+- 原子性：每个 repo 固定执行  
+  `SQLite: begin → upsert_repo → delete_repo_chunks → insert_chunks` →  
+  `Chroma: delete_repo → upsert_records` → `SQLite: commit`。如写入失败，立即抛出异常并回滚当前 repo；不得引入静默降级或备用路径。
+- 监控：`StageMetrics` 新增 `writer_items`（成功写入的 repo 数）与 `max_queue_depth`（运行期间的队列峰值），用于确认串行写入是否健康。
 
 ### ModelScope 数据集来源实现
 
@@ -391,7 +398,7 @@ metrics = asyncio.run(runner.run())
 - Header：每个 HTTP 请求都带 `User-Agent: UltraRAG-Community-Agent/0.1` 和随机生成的 `X-Request-ID`，与官方 SDK 要求一致。
 - 其它阶段（Clean → Split → Embed → Ingest）完全继承基础 SOP 规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
 
-配套脚本 `script/ingest_modelscope_datasets_readmes.py` 与模型脚本一致，新增可选环境变量 `MODELSCOPE_DATASETS_TARGET` 用于限制本次抓取数量（缺省遍历全部数据集）。示例：
+配套脚本 `script/ingest_modelscope_datasets_readmes.py` 与模型脚本共享同一集中写入通路，仅保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余写入流程不可配置、不可切换。示例：
 
 ```
 MODELSCOPE_DATASETS_TARGET=50 \
@@ -400,6 +407,8 @@ EMBEDDING_API_KEY=... \
 EMBEDDING_MODEL=... \
 .venv/bin/python script/ingest_modelscope_datasets_readmes.py
 ```
+
+模型 README 入库脚本 `script/ingest_modelscope_readmes.py` 同样复用这一单一写入通路；仓库中不再保留任何并行写入实现或隐藏开关。
 
 ## 8. 实现目录建议
 

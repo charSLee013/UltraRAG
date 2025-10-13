@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional, Tuple
 import logging, time
 
 from dotenv import load_dotenv
@@ -30,8 +30,10 @@ class IngestionRunner:
         self.limits = limits
         self.fetch_force = fetch_force
         self.fetch_kwargs = fetch_kwargs or {}
-        self.q_docs: asyncio.Queue[Optional[RawDocument]] = asyncio.Queue(
-            maxsize=max(2 * limits.max_workers, 1)
+        queue_size = max(2 * limits.max_workers, 1)
+        self.q_docs: asyncio.Queue[Optional[RawDocument]] = asyncio.Queue(maxsize=queue_size)
+        self.q_ingest: asyncio.Queue[Optional[Tuple[List[ChunkRecord], RawDocument]]] = asyncio.Queue(
+            maxsize=queue_size
         )
         self.embed_budget = max(1, limits.max_embed_concurrency)
         self.embed_sem = asyncio.Semaphore(self.embed_budget)
@@ -40,20 +42,31 @@ class IngestionRunner:
         self._docs_produced = 0
         self._records_ingested = 0
         self._embed_trace: list[int] = [self.embed_budget]
+        self._writer_items = 0
+        self._max_ingest_queue = 0
 
     async def run(self) -> StageMetrics:
         producer = asyncio.create_task(self._produce_docs())
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.limits.max_workers)]
+        writer = asyncio.create_task(self._writer())
+
         await producer
         await self.q_docs.join()
         for _ in workers:
             await self.q_docs.put(None)
         await asyncio.gather(*workers)
+
+        await self.q_ingest.join()
+        await self.q_ingest.put(None)
+        await writer
+
         return StageMetrics(
             stage="run",
             total_in=self._docs_produced,
             total_out=self._records_ingested,
             embed_budget_trace=self._embed_trace,
+            writer_items=self._writer_items,
+            max_queue_depth=self._max_ingest_queue,
         )
 
     async def _produce_docs(self) -> None:
@@ -84,15 +97,7 @@ class IngestionRunner:
                     len(records),
                     time.perf_counter() - t0,
                 )
-                t1 = time.perf_counter()
-                await self._call_ingest(records, raw)
-                _logger.info(
-                    "[ingest] repo=%s records=%s elapsed=%.2fs",
-                    raw.repo_id,
-                    len(records),
-                    time.perf_counter() - t1,
-                )
-                self._records_ingested += len(records)
+                await self._enqueue_ingest(records, raw)
             finally:
                 self.q_docs.task_done()
 
@@ -121,6 +126,33 @@ class IngestionRunner:
         self.embed_budget = max(1, self.embed_budget // 2)
         self.embed_sem = asyncio.Semaphore(self.embed_budget)
         self._embed_trace.append(self.embed_budget)
+
+    async def _enqueue_ingest(self, records: List[ChunkRecord], raw: RawDocument) -> None:
+        await self.q_ingest.put((records, raw))
+        size = self.q_ingest.qsize()
+        if size > self._max_ingest_queue:
+            self._max_ingest_queue = size
+
+    async def _writer(self) -> None:
+        while True:
+            item = await self.q_ingest.get()
+            try:
+                if item is None:
+                    return
+                records, raw = item
+                t0 = time.perf_counter()
+                await self._call_ingest(records, raw)
+                elapsed = time.perf_counter() - t0
+                _logger.info(
+                    "[ingest] repo=%s records=%s elapsed=%.2fs",
+                    raw.repo_id,
+                    len(records),
+                    elapsed,
+                )
+                self._records_ingested += len(records)
+                self._writer_items += 1
+            finally:
+                self.q_ingest.task_done()
 
     async def _call_ingest(self, records: List[ChunkRecord], raw: RawDocument) -> None:
         func = self._ingest_func or self.pipeline.ingest

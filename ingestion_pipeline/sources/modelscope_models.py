@@ -493,7 +493,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             return None, None
 
         download_url = get_file_download_url(
-            repo_id=repo_id,
+            model_id=repo_id,
             file_path=readme_entry["Path"],
             revision=revision,
             endpoint=self._hub_api.endpoint,

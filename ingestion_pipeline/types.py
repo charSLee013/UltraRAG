@@ -77,5 +77,6 @@ class StageMetrics:
     dropped: int = 0
     warnings: List[str] = field(default_factory=list)
     sample_locators: List[SourceLocator] = field(default_factory=list)
-    embed_budget_trace: Optional[List[int]] = None
     embed_budget_trace: List[int] = field(default_factory=list)
+    writer_items: int = 0
+    max_queue_depth: int = 0

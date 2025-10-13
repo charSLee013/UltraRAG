@@ -154,6 +154,7 @@ async def _run() -> None:
 def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, signal.default_int_handler)
+        
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
