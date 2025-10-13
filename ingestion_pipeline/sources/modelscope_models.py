@@ -74,27 +74,22 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             except Exception as exc:
                 self.logger.warning("[modelscope.fetch] login failed: %s", exc)
 
-        # Planned target pairs after computing set-difference against SQLite.
-        # Stored as ordered list of (owner, name).
-        self._planned_pairs: Optional[List[Tuple[str, str]]] = None
-
     def register_ingested_hash(self, content_hash: str) -> None:
         """Record a content_hash after a successful ingest to keep skip lists in sync."""
         if content_hash:
             self._existing_content_hashes.add(content_hash)
 
     def estimate_total_models(self) -> Optional[int]:
-        """Return the number of not-yet-ingested unique models (set difference).
-
-        Always compute the set-difference plan before fetching. To avoid long
-        startup when a per-run target is specified, planning stops once
-        `target_repo_count` is reached.
-        """
+        """Return total models reported by the Hub API, or None on failure."""
         try:
-            total = self._prefetch_planned_pairs(max_targets=self.target_repo_count)
-            return total
+            data = self._hub_api.list_models(owner_or_group="", page_number=1, page_size=1)
         except Exception as exc:
-            self.logger.warning("[modelscope.fetch] failed to preselect planned targets: %s", exc)
+            self.logger.warning("[modelscope.fetch] failed to fetch total count: %s", exc)
+            return None
+        total = data.get("TotalCount")
+        try:
+            return int(total)
+        except (TypeError, ValueError):
             return None
 
     async def fetch(
@@ -129,50 +124,58 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         elif self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
 
-        # 1) Always prefetch planned targets (set-diff) before scheduling README fetches
-        if self._planned_pairs is None:
-            self._prefetch_planned_pairs(page_size=page_size, max_targets=self.target_repo_count)
-        ordered_pairs = list(self._planned_pairs or [])
-
-        yielded_total = 0
-
-        # Constrain task fan-out to a page-sized window to avoid scheduling
-        # tens of thousands of concurrent tasks at once.
+        seen_repo_ids: set[str] = set()
+        current_page = 1
         effective_page_size = page_size if page_size is not None else self.api_page_size
         if effective_page_size is None:
             effective_page_size = 100
         effective_page_size = max(1, min(int(effective_page_size), 100))
+        yielded_total = 0  # successful README fetches in this run
+        total_count: Optional[int] = None
 
-        def make_task(idx: int, owner: str, name: str):
-            repo_id = f"models:{owner}/{name}"
-            content_hash = self._compute_content_hash(repo_id)
-            if not force and content_hash in skip_content_hashes:
-                return None
-            locator = SourceLocator(
-                source_type=SourceType.MODELS,
-                owner_repo=f"{owner}/{name}",
-                source_url=self._build_source_url(owner, name),
+        while True:
+            entries, page_total_count = await asyncio.to_thread(
+                self._list_models_page_with_retry,
+                current_page,
+                effective_page_size,
             )
-            task = asyncio.create_task(
-                self._build_raw_document_async(
-                    owner=owner,
-                    name=name,
-                    raw_item={},
-                    locator=locator,
-                    repo_id=repo_id,
+            if total_count is None:
+                total_count = page_total_count
+            if not entries:
+                self.logger.info(
+                    "[modelscope.fetch] stopping at page=%s (no items returned)",
+                    current_page,
                 )
-            )
-            return (idx, repo_id, task)
+                break
 
-        i = 0
-        n = len(ordered_pairs)
-        while i < n:
-            batch = ordered_pairs[i : i + effective_page_size]
+            yielded_on_page = 0
             download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
-            for j, (owner, name) in enumerate(batch):
-                item = make_task(i + j, owner, name)
-                if item is not None:
-                    download_tasks.append(item)
+
+            for idx, (owner, name, raw_item) in enumerate(entries):
+                repo_id = f"models:{owner}/{name}"
+                if repo_id in seen_repo_ids:
+                    continue
+                seen_repo_ids.add(repo_id)
+
+                content_hash = self._compute_content_hash(repo_id)
+                if not force and content_hash in skip_content_hashes:
+                    continue
+
+                locator = SourceLocator(
+                    source_type=SourceType.MODELS,
+                    owner_repo=f"{owner}/{name}",
+                    source_url=self._build_source_url(owner, name),
+                )
+                task = asyncio.create_task(
+                    self._build_raw_document_async(
+                        owner=owner,
+                        name=name,
+                        raw_item=raw_item,
+                        locator=locator,
+                        repo_id=repo_id,
+                    )
+                )
+                download_tasks.append((idx, repo_id, task))
 
             for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
                 try:
@@ -189,6 +192,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                     continue
 
                 yield raw_document
+                yielded_on_page += 1
                 yielded_total += 1
                 skip_content_hashes.add(raw_document.content_hash)
 
@@ -199,7 +203,28 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                     )
                     return
 
-            i += effective_page_size
+            # Do NOT stop on failures; continue paging until we reach the
+            # requested number of successful README fetches or exhaust pages.
+
+            self.logger.info(
+                "[modelscope.fetch] page=%s yielded=%s (total seen=%s)",
+                current_page,
+                yielded_on_page,
+                len(seen_repo_ids),
+            )
+            current_page += 1
+            # If API reports a finite total, stop once we've inspected that many entries
+            # without reaching the target successes. This still honours the success-based
+            # quota by only breaking after all pages are exhausted.
+            if total_count is not None and (current_page - 1) * effective_page_size >= total_count:
+                break
+
+        if target_successes is not None and yielded_total < target_successes:
+            self.logger.warning(
+                "[modelscope.fetch] exhausted available pages before meeting quota: yielded=%s target=%s",
+                yielded_total,
+                target_successes,
+            )
 
     async def process(
         self,
@@ -382,61 +407,6 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
 
     def _build_source_url(self, owner: str, name: str) -> str:
         return f"https://modelscope.cn/models/{owner}/{name}"
-
-    def _prefetch_planned_pairs(self, page_size: Optional[int] = None, max_targets: Optional[int] = None) -> int:
-        """Build an ordered list of repo pairs not yet ingested (set difference).
-
-        Returns the number of planned targets and caches them in
-        `self._planned_pairs`.
-        """
-        if self._planned_pairs is not None:
-            return len(self._planned_pairs)
-
-        effective_page_size = page_size if page_size is not None else self.api_page_size
-        if effective_page_size is None:
-            effective_page_size = 100
-        effective_page_size = max(1, min(int(effective_page_size), 100))
-
-        seen_repo_ids: set[str] = set()
-        planned: List[Tuple[str, str]] = []
-
-        current_page = 1
-        total_count: Optional[int] = None
-        while True:
-            entries, page_total_count = self._list_models_page_with_retry(
-                current_page, effective_page_size
-            )
-            if total_count is None:
-                total_count = page_total_count
-            if not entries:
-                break
-
-            for owner, name, _raw_item in entries:
-                repo_id = f"models:{owner}/{name}"
-                if repo_id in seen_repo_ids:
-                    continue
-                seen_repo_ids.add(repo_id)
-                content_hash = self._compute_content_hash(repo_id)
-                if content_hash in self._existing_content_hashes:
-                    continue
-                planned.append((owner, name))
-                if max_targets is not None and len(planned) >= max_targets:
-                    # Enough targets selected; stop scanning early
-                    self._planned_pairs = planned
-                    self.logger.info(
-                        "[modelscope.prefetch] planned targets hit limit=%s at page=%s",
-                        max_targets,
-                        current_page,
-                    )
-                    return len(planned)
-
-            current_page += 1
-            if total_count is not None and (current_page - 1) * effective_page_size >= total_count:
-                break
-
-        self._planned_pairs = planned
-        self.logger.info("[modelscope.prefetch] planned targets=%s (diff set)", len(planned))
-        return len(planned)
 
     def _list_models_page_with_retry(
         self,
