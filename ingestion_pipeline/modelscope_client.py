@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import dataclasses
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import asyncio
+import uuid
 from html.parser import HTMLParser
 from typing import AsyncGenerator, Dict, Iterable, List, Optional, Tuple
 
@@ -60,14 +60,16 @@ class Document:
 
 
 class ModelScopeClient:
-    def __init__(self,
-                 endpoint: str = DEFAULT_ENDPOINT,
-                 *,
-                 model_page_size: int = 200,
-                 dataset_page_size: int = 100,
-                 timeout: int = 30,
-                 max_retries: int = 4,
-                 initial_backoff: float = 1.0) -> None:
+    def __init__(
+        self,
+        endpoint: str = DEFAULT_ENDPOINT,
+        *,
+        model_page_size: int = 200,
+        dataset_page_size: int = 100,
+        timeout: int = 30,
+        max_retries: int = 4,
+        initial_backoff: float = 1.0,
+    ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.model_page_size = model_page_size
         self.dataset_page_size = dataset_page_size
@@ -86,13 +88,15 @@ class ModelScopeClient:
             await self._client.aclose()
         self._client = None
 
-    # ---------------------------- models ----------------------------
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         assert self._client is not None
         backoff = self.initial_backoff
         for attempt in range(self.max_retries):
             try:
-                resp = await self._client.request(method, url, **kwargs)
+                headers = kwargs.pop("headers", {})
+                base_headers = dict(self._client.headers)
+                request_headers = {**base_headers, **headers, "X-Request-ID": uuid.uuid4().hex}
+                resp = await self._client.request(method, url, headers=request_headers, **kwargs)
                 if resp.status_code in {429, 500, 502, 503, 504}:
                     raise httpx.HTTPStatusError("server busy", request=resp.request, response=resp)
                 return resp
@@ -104,11 +108,7 @@ class ModelScopeClient:
         raise RuntimeError("unreachable")
 
     async def _models_page(self, page_number: int) -> Dict[str, object]:
-        payload = {
-            "Path": "",
-            "PageNumber": page_number,
-            "PageSize": self.model_page_size,
-        }
+        payload = {"Path": "", "PageNumber": page_number, "PageSize": self.model_page_size}
         resp = await self._request("PUT", f"{self.endpoint}/api/v1/models", json=payload)
         resp.raise_for_status()
         data = resp.json().get("Data")
@@ -155,14 +155,16 @@ class ModelScopeClient:
                 size = int(size)
             elif not isinstance(size, int):
                 size = None
-            result.append(ModelFile(
-                owner=owner,
-                name=name,
-                path=path,
-                revision=revision,
-                size=size,
-                source_url=item.get("DownloadUrl") if isinstance(item.get("DownloadUrl"), str) else None,
-            ))
+            result.append(
+                ModelFile(
+                    owner=owner,
+                    name=name,
+                    path=path,
+                    revision=revision,
+                    size=size,
+                    source_url=item.get("DownloadUrl") if isinstance(item.get("DownloadUrl"), str) else None,
+                )
+            )
         return result
 
     async def fetch_model_file_content(self, file: ModelFile) -> Optional[Tuple[str, str]]:
@@ -177,13 +179,9 @@ class ModelScopeClient:
         resp.encoding = resp.encoding or "utf-8"
         return resp.text, str(resp.url)
 
-    # ---------------------------- datasets ----------------------------
     async def _datasets_page(self, page_number: int) -> Dict[str, object]:
         assert self._client is not None
-        params = {
-            "PageNumber": page_number,
-            "PageSize": self.dataset_page_size,
-        }
+        params = {"PageNumber": page_number, "PageSize": self.dataset_page_size}
         resp = await self._request("GET", f"{self.endpoint}/api/v1/dolphin/datasets", params=params)
         resp.raise_for_status()
         return resp.json()
@@ -214,8 +212,7 @@ class ModelScopeClient:
         if resp.status_code != 200:
             return None
         payload = resp.json()
-        data = payload.get("Data")
-        return data
+        return payload.get("Data")
 
     async def fetch_summary_fallback(self, repo_type: str, owner: str, name: str) -> Tuple[str, str]:
         assert self._client is not None
@@ -223,8 +220,7 @@ class ModelScopeClient:
         url = f"{self.endpoint}/{segment}/{owner}/{name}/summary"
         resp = await self._request("GET", url)
         resp.raise_for_status()
-        text = strip_html(resp.text)
-        return text, url
+        return strip_html(resp.text), url
 
     @staticmethod
     def now_utc() -> str:

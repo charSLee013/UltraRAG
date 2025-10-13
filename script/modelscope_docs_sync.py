@@ -17,7 +17,7 @@ from chromadb import PersistentClient
 import httpx
 from dotenv import load_dotenv
 
-from modelscope_client import DEFAULT_ENDPOINT, Document, ModelScopeClient
+from ingestion_pipeline.modelscope_client import DEFAULT_ENDPOINT, Document, ModelScopeClient
 
 load_dotenv()
 

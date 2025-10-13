@@ -382,6 +382,25 @@ metrics = asyncio.run(runner.run())
 - Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。
 - 嵌入适配器使用 `httpx.AsyncClient`，向 `{EMBEDDING_API_URL.rstrip('/')}/embeddings` 发送 `POST`，Body 包含 `model`、`input`（批量文本）以及可选的 `encoding_format`、`dimensions`；必须提供 `Authorization: Bearer {EMBEDDING_API_KEY}`。严格保持最小实现，避免额外封装或“自动拼路径”造成路径重复。
 
+### ModelScope 数据集来源实现
+
+`ingestion_pipeline/sources/datasets_pipeline.py` 复用同样的抽象，仅有的差异在 Fetch 阶段：
+
+- 列表获取：通过官方 `/api/v1/dolphin/datasets` 接口（`ModelScopeClient.iter_datasets`）枚举全部数据集，使用 `Namespace/Name` 构造 `repo_id = datasets:{owner}/{name}`。不再支持传入 allow-list 或 namespace 过滤，确保唯一通路。
+- README 获取：调用 `/api/v1/datasets/{owner}/{name}` 读取 `ReadmeContent` 字段，缺失时直接跳过（并记录 warning），保持 `content_hash == repo_id` 的去重语义。
+- Header：每个 HTTP 请求都带 `User-Agent: UltraRAG-Community-Agent/0.1` 和随机生成的 `X-Request-ID`，与官方 SDK 要求一致。
+- 其它阶段（Clean → Split → Embed → Ingest）完全继承基础 SOP 规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
+
+配套脚本 `script/ingest_modelscope_datasets_readmes.py` 与模型脚本一致，新增可选环境变量 `MODELSCOPE_DATASETS_TARGET` 用于限制本次抓取数量（缺省遍历全部数据集）。示例：
+
+```
+MODELSCOPE_DATASETS_TARGET=50 \
+EMBEDDING_API_URL=... \
+EMBEDDING_API_KEY=... \
+EMBEDDING_MODEL=... \
+.venv/bin/python script/ingest_modelscope_datasets_readmes.py
+```
+
 ## 8. 实现目录建议
 
 保持结构简洁的同时，用文件夹归类可复用组件，子类集中在 `sources/` 并提供 `base.py` 统一抽象：
