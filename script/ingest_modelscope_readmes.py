@@ -8,7 +8,7 @@ import sys
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Iterable, List, Tuple
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -24,6 +24,7 @@ from ingestion_pipeline.sources.modelscope_models import ModelScopeModelsPipelin
 from ingestion_pipeline.stores.chroma import ChromaStore
 from ingestion_pipeline.stores.ingestor import SqliteChromaIngestor
 from ingestion_pipeline.stores.sqlite import SQLiteStore
+from ingestion_pipeline.types import SourceLocator, SourceType
 
 
 load_dotenv()
@@ -75,31 +76,77 @@ async def _run_ingestion() -> None:
     chroma_store = ChromaStore()
     ingestor = SqliteChromaIngestor(sqlite_store, chroma_store)
 
+    # 1) Collect existing models content_hashes from SQLite (models only)
     existing_content_hashes: set[str] = set()
     try:
-        cur = sqlite_store.conn.execute("SELECT content_hash, repo_id FROM repo")
-        for content_hash, repo_id in cur.fetchall():
-            existing_content_hashes.add(content_hash or repo_id)
+        cur = sqlite_store.conn.execute(
+            "SELECT content_hash FROM repo WHERE source_type=?",
+            (str(SourceType.MODELS),),
+        )
+        for (content_hash,) in cur.fetchall():
+            if content_hash:
+                existing_content_hashes.add(content_hash)
     except Exception as exc:
-        raise RuntimeError(f"Failed to enumerate existing repo ids: {exc}") from exc
+        raise RuntimeError(f"Failed to enumerate existing model repo ids: {exc}") from exc
 
-    pipeline = ModelScopeModelsPipeline(
-        page_size=target_models,
-        existing_content_hashes=existing_content_hashes,
-    )
+    # 2) Plan: list all models, dedupe, subtract existing; early-stop by target_models
+    planner = ModelScopeModelsPipeline(page_size=100, existing_content_hashes=None)
+    planned_pairs: List[Tuple[str, str]] = []
+    seen_repo_ids: set[str] = set()
+    current_page = 1
+    effective_page = 100
+    while True:
+        entries, total_count = planner._list_models_page_with_retry(current_page, effective_page)
+        if not entries:
+            break
+        for owner, name, _raw in entries:
+            repo_id = f"models:{owner}/{name}"
+            if repo_id in seen_repo_ids:
+                continue
+            seen_repo_ids.add(repo_id)
+            if repo_id in existing_content_hashes:
+                continue
+            planned_pairs.append((owner, name))
+            if target_models is not None and len(planned_pairs) >= target_models:
+                break
+        if target_models is not None and len(planned_pairs) >= target_models:
+            break
+        current_page += 1
+
+    # 3) Wrap a planned-only pipeline that fetches exactly these repos
+    class PlannedModelScopePipeline(ModelScopeModelsPipeline):
+        def __init__(self, planned: List[Tuple[str, str]]):
+            super().__init__(page_size=len(planned) or 1, existing_content_hashes=None)
+            self._planned = planned
+
+        async def fetch(self, *, force: bool = False, page_size: Optional[int] = None, **kwargs):
+            for owner, name in self._planned:
+                repo_id = f"models:{owner}/{name}"
+                locator = SourceLocator(
+                    source_type=SourceType.MODELS,
+                    owner_repo=f"{owner}/{name}",
+                    source_url=self._build_source_url(owner, name),
+                )
+                try:
+                    raw = await self._build_raw_document_async(
+                        owner=owner,
+                        name=name,
+                        raw_item={},
+                        locator=locator,
+                        repo_id=repo_id,
+                    )
+                except Exception:
+                    continue
+                if raw is None:
+                    continue
+                yield raw
+
+    pipeline = PlannedModelScopePipeline(planned_pairs)
     embed_fn = get_default_embed_fn()
 
     limits = PipelineRuntimeLimits()
 
-    total_hint = pipeline.estimate_total_models()
-    total_for_run: Optional[int]
-    if target_models is not None and target_models > 0:
-        total_for_run = target_models
-        if total_hint:
-            total_for_run = min(total_hint, target_models)
-    else:
-        total_for_run = total_hint
-
+    total_for_run: Optional[int] = len(planned_pairs)
     progress = tqdm(desc="ModelScope ingest", unit="repo", leave=True, total=total_for_run)
     totals = {"repos": 0, "chunks": 0}
 
