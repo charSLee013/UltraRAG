@@ -86,6 +86,7 @@ async def _run_ingestion() -> None:
     pipeline = ModelScopeModelsPipeline(
         page_size=target_models,
         existing_content_hashes=existing_content_hashes,
+        prefetch_planning=True,  # preselect (ListModels - SQLite) so tqdm total is the remaining count
     )
     embed_fn = get_default_embed_fn()
 

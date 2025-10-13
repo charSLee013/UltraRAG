@@ -97,7 +97,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             # Fast path: skip heavy prefetch so caller can start progress immediately.
             return None
         try:
-            total = self._prefetch_planned_pairs()
+            total = self._prefetch_planned_pairs(max_targets=self.target_repo_count)
             return total
         except Exception as exc:
             self.logger.warning("[modelscope.fetch] failed to preselect planned targets: %s", exc)
@@ -438,7 +438,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     def _build_source_url(self, owner: str, name: str) -> str:
         return f"https://modelscope.cn/models/{owner}/{name}"
 
-    def _prefetch_planned_pairs(self, page_size: Optional[int] = None) -> int:
+    def _prefetch_planned_pairs(self, page_size: Optional[int] = None, max_targets: Optional[int] = None) -> int:
         """Build an ordered list of repo pairs not yet ingested (set difference).
 
         Returns the number of planned targets and caches them in
@@ -475,6 +475,15 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                 if content_hash in self._existing_content_hashes:
                     continue
                 planned.append((owner, name))
+                if max_targets is not None and len(planned) >= max_targets:
+                    # Enough targets selected; stop scanning early
+                    self._planned_pairs = planned
+                    self.logger.info(
+                        "[modelscope.prefetch] planned targets hit limit=%s at page=%s",
+                        max_targets,
+                        current_page,
+                    )
+                    return len(planned)
 
             current_page += 1
             if total_count is not None and (current_page - 1) * effective_page_size >= total_count:
