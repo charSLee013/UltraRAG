@@ -67,6 +67,9 @@ Every feature or significant change must have an SOP entry under `docs/sop/` bef
 
 ### Iron Rules
 - Never modify repository files when the user only asks for strategy, analysis, or a plan. Deliver the plan first and wait for explicit implementation instructions before changing code.
+- Official API First (hard requirement): Always use upstream, documented APIs and their provided fields as the primary contract; do not introduce ad‑hoc scraping, directory scanning, or heuristic fallbacks when the official API already supplies the needed data. Example: for ModelScope ingestion, prefer `ReadMeContent` from ListModels over any repo file traversal.
+- Single Path Only (hard requirement): Do not leave multiple code paths, runtime flags, or “optional” modes that implement the same responsibility. Pick one path per SOP, remove legacy/alternate paths in the same change, and keep behavior explicit and auditable.
+- No defensive “backup” logic: If an upstream API call fails, surface a clear error with actionable context rather than silently switching to an alternative behavior. Any alternative must be specified first in SOP and then implemented as the sole path.
 
 ## Commit & Pull Request Guidelines
 Commit using Conventional Commits (`feat: add hybrid retriever`, `fix: guard empty query`). Keep changes scoped and reference issues in the footer when relevant. Pull requests should summarize the user-facing impact, list verification commands, and attach logs or screenshots for pipeline demos. When modifying benchmark servers, note any dataset or environment prerequisites so reviewers can reproduce results quickly.
