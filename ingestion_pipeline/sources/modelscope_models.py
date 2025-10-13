@@ -45,6 +45,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         backoff_factor: float = 2.0,
         timeout: float | None = 60.0,
         existing_content_hashes: Optional[Iterable[str]] = None,
+        prefetch_planning: bool = False,
     ) -> None:
         if page_size is not None and page_size < 1:
             raise ValueError("page_size must be >= 1 or None")
@@ -64,6 +65,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         self.delay_range = (0.1, 3.5)
         self._existing_content_hashes = set(filter(None, existing_content_hashes or []))
         self.logger = logging.getLogger("ingestion.sources.modelscope_models")
+        self.prefetch_planning = bool(prefetch_planning)
 
         endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or None
         self._hub_api = HubApi(endpoint=endpoint, timeout=self.list_timeout, max_retries=self.max_retries)
@@ -91,6 +93,9 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         `self._existing_content_hashes`. The result is cached in
         `self._planned_pairs` and reused by fetch().
         """
+        if not self.prefetch_planning:
+            # Fast path: skip heavy prefetch so caller can start progress immediately.
+            return None
         try:
             total = self._prefetch_planned_pairs()
             return total
@@ -130,8 +135,9 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         elif self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
 
-        # 1) Prefetch planned targets as a set-difference: (all list_models) - (already ingested)
-        if self._planned_pairs is None:
+        # 1) If prefetch planning was requested, use planned pairs; otherwise stream per-page
+        use_planned = self.prefetch_planning
+        if use_planned and self._planned_pairs is None:
             self._prefetch_planned_pairs(page_size=page_size)
         ordered_pairs = list(self._planned_pairs or [])
 
@@ -165,42 +171,90 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             )
             return (idx, repo_id, task)
 
-        i = 0
-        n = len(ordered_pairs)
-        while i < n:
-            batch = ordered_pairs[i : i + effective_page_size]
-            download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
-            for j, (owner, name) in enumerate(batch):
-                item = make_task(i + j, owner, name)
-                if item is not None:
-                    download_tasks.append(item)
+        if use_planned:
+            i = 0
+            n = len(ordered_pairs)
+            while i < n:
+                batch = ordered_pairs[i : i + effective_page_size]
+                download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
+                for j, (owner, name) in enumerate(batch):
+                    item = make_task(i + j, owner, name)
+                    if item is not None:
+                        download_tasks.append(item)
 
-            for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
-                try:
-                    raw_document = await task
-                except Exception as exc:
-                    self.logger.debug(
-                        "[modelscope.fetch] repo=%s readme task raised err=%s",
-                        repo_id,
-                        exc,
-                    )
-                    continue
+                for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
+                    try:
+                        raw_document = await task
+                    except Exception as exc:
+                        self.logger.debug(
+                            "[modelscope.fetch] repo=%s readme task raised err=%s",
+                            repo_id,
+                            exc,
+                        )
+                        continue
 
-                if raw_document is None:
-                    continue
+                    if raw_document is None:
+                        continue
 
-                yield raw_document
-                yielded_total += 1
-                skip_content_hashes.add(raw_document.content_hash)
+                    yield raw_document
+                    yielded_total += 1
+                    skip_content_hashes.add(raw_document.content_hash)
 
-                if target_successes is not None and yielded_total >= target_successes:
-                    self.logger.info(
-                        "[modelscope.fetch] reached per-run quota=%s, stopping",
-                        target_successes,
-                    )
-                    return
+                    if target_successes is not None and yielded_total >= target_successes:
+                        self.logger.info(
+                            "[modelscope.fetch] reached per-run quota=%s, stopping",
+                            target_successes,
+                        )
+                        return
 
-            i += effective_page_size
+                i += effective_page_size
+        else:
+            # Streaming per-page: dedup + set-diff while yielding immediately
+            seen_repo_ids: set[str] = set()
+            current_page = 1
+            yielded_total = 0
+            while True:
+                entries, total_count = await asyncio.to_thread(
+                    self._list_models_page_with_retry,
+                    current_page,
+                    effective_page_size,
+                )
+                if not entries:
+                    break
+
+                download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
+                for j, (owner, name, _raw_item) in enumerate(entries):
+                    repo_id = f"models:{owner}/{name}"
+                    if repo_id in seen_repo_ids:
+                        continue
+                    seen_repo_ids.add(repo_id)
+                    item = make_task((current_page - 1) * effective_page_size + j, owner, name)
+                    if item is not None:
+                        download_tasks.append(item)
+
+                for idx, repo_id, task in sorted(download_tasks, key=lambda e: e[0]):
+                    try:
+                        raw_document = await task
+                    except Exception as exc:
+                        self.logger.debug(
+                            "[modelscope.fetch] repo=%s readme task raised err=%s",
+                            repo_id,
+                            exc,
+                        )
+                        continue
+                    if raw_document is None:
+                        continue
+                    yield raw_document
+                    yielded_total += 1
+                    skip_content_hashes.add(raw_document.content_hash)
+                    if target_successes is not None and yielded_total >= target_successes:
+                        self.logger.info(
+                            "[modelscope.fetch] reached per-run quota=%s, stopping",
+                            target_successes,
+                        )
+                        return
+
+                current_page += 1
 
     async def process(
         self,

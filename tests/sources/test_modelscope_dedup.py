@@ -58,6 +58,8 @@ async def test_set_diff_prefetch_and_fetch_only_new():
     p = _DummyPipeline(existing)
 
     # Planned targets should be unique and exclude existing: {alice/m2, bob/m3, carol/m4}
+    # Enable prefetch mode for exact planning total in test
+    p.prefetch_planning = True
     total = p.estimate_total_models()
     assert total == 3
 
