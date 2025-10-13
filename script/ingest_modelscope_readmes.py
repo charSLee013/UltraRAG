@@ -96,6 +96,7 @@ async def _run_ingestion() -> None:
     current_page = 1
     effective_page = 100
     while True:
+        print(f"\rFetch the modelscope models for {current_page} page...")
         entries, total_count = planner._list_models_page_with_retry(current_page, effective_page)
         if not entries:
             break
