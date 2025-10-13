@@ -121,15 +121,13 @@ async def _run() -> None:
     if total_remote is not None:
         logging.info("[datasets.main] remote_total=%s", total_remote)
     if remaining is not None:
-        logging.info(
-            "[datasets.main] dedupe_remaining=%s",
-            remaining if target_count is None else min(remaining, target_count),
-        )
-        if remaining == 0:
-            logging.info("[datasets.main] nothing new to ingest; exiting")
-            progress.close()
-            sqlite_store.close()
-            return
+        planned_total = remaining if target_count is None else min(remaining, target_count)
+        logging.info("[datasets.main] dedupe_remaining=%s", planned_total)
+        if planned_total and progress.total is None:
+            progress.total = planned_total
+            progress.refresh()
+        if planned_total == 0:
+            logging.info("[datasets.main] nothing new to ingest; still scanning for verification")
     start = time.perf_counter()
     try:
         metrics = await runner.run()
