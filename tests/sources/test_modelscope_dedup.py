@@ -10,7 +10,8 @@ from ingestion_pipeline.types import RawDocument, SourceLocator, SourceType
 class _DummyPipeline(ModelScopeModelsPipeline):
     def __init__(self, existing):
         # page_size=2 to simulate multiple pages in the stub
-        super().__init__(page_size=2, existing_content_hashes=existing)
+        super().__init__(page_size=None, existing_content_hashes=existing)
+        self.api_page_size = 2
         self._calls = {"list": 0, "build": 0}
 
     def _list_models_page_with_retry(self, page_number: int, page_size: int):
@@ -51,21 +52,19 @@ class _DummyPipeline(ModelScopeModelsPipeline):
         )
 
 
-@pytest.mark.asyncio
-async def test_set_diff_prefetch_and_fetch_only_new():
+def test_set_diff_prefetch_and_fetch_only_new():
     # Pretend models:alice/m1 is already in SQLite (existing)
     existing = {"models:alice/m1"}
     p = _DummyPipeline(existing)
 
     # Planned targets should be unique and exclude existing: {alice/m2, bob/m3, carol/m4}
-    # Enable prefetch mode for exact planning total in test
-    p.prefetch_planning = True
-    total = p.estimate_total_models()
-    assert total == 3
+    async def _collect():
+        items = []
+        async for raw in p.fetch():
+            items.append(raw.repo_id)
+        return items
 
-    got = []
-    async for raw in p.fetch():
-        got.append(raw.repo_id)
+    got = asyncio.run(_collect())
     assert got == [
         "models:alice/m2",
         "models:bob/m3",

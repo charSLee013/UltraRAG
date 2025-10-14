@@ -52,3 +52,42 @@ class SqliteChromaIngestor:
         except Exception:
             self.sqlite.rollback()
             raise
+
+    def ingest_many(self, items: List[tuple[List[ChunkRecord], RawDocument]]) -> None:
+        if not items:
+            return
+        # Normalize fetched_at
+        for records, raw in items:
+            for r in records:
+                if getattr(r, "fetched_at", None) is None:
+                    r.fetched_at = raw.fetched_at
+
+        # Phase 1: SQLite in single transaction
+        self.sqlite.begin()
+        try:
+            for records, raw in items:
+                repo_id = raw.repo_id
+                self.sqlite.upsert_repo(raw)
+                self.sqlite.delete_repo_chunks(repo_id)
+                if records:
+                    self.sqlite._insert_records(records)
+            self.sqlite.commit()
+        except Exception:
+            self.sqlite.rollback()
+            raise
+
+        # Phase 2: Chroma — delete then upsert in batches
+        try:
+            for _records, raw in items:
+                self.chroma.delete_repo(raw.repo_id)
+            all_records: List[ChunkRecord] = [r for records, _ in items for r in records]
+            if all_records:
+                self.chroma.upsert_records(all_records)
+        except Exception:
+            # best-effort rollback on Chroma side per repo
+            for _records, raw in items:
+                try:
+                    self.chroma.delete_repo(raw.repo_id)
+                except Exception:
+                    pass
+            raise

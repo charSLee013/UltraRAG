@@ -25,6 +25,9 @@ class IngestionRunner:
         fetch_force: bool = False,
         fetch_kwargs: Optional[dict] = None,
         ingest_func: Optional[Callable[[List[ChunkRecord], RawDocument], Optional[Awaitable[None]]]] = None,
+        ingest_many_func: Optional[
+            Callable[[List[Tuple[List[ChunkRecord], RawDocument]]], Optional[Awaitable[None]]]
+        ] = None,
     ) -> None:
         self.pipeline = pipeline
         self.limits = limits
@@ -39,6 +42,7 @@ class IngestionRunner:
         self.embed_sem = asyncio.Semaphore(self.embed_budget)
         self._embed_func = embed_func
         self._ingest_func = ingest_func
+        self._ingest_many_func = ingest_many_func
         self._docs_produced = 0
         self._records_ingested = 0
         self._embed_trace: list[int] = [self.embed_budget]
@@ -134,28 +138,41 @@ class IngestionRunner:
             self._max_ingest_queue = size
 
     async def _writer(self) -> None:
+        batch: List[Tuple[List[ChunkRecord], RawDocument]] = []
         while True:
             item = await self.q_ingest.get()
-            try:
-                if item is None:
-                    return
-                records, raw = item
-                t0 = time.perf_counter()
-                await self._call_ingest(records, raw)
-                elapsed = time.perf_counter() - t0
-                _logger.info(
-                    "[ingest] repo=%s records=%s elapsed=%.2fs",
-                    raw.repo_id,
-                    len(records),
-                    elapsed,
-                )
-                self._records_ingested += len(records)
-                self._writer_items += 1
-            finally:
+            if item is None:
                 self.q_ingest.task_done()
+                await self._flush_ingest_batch(batch)
+                return
+            batch.append(item)
+            self.q_ingest.task_done()
+            if len(batch) >= self._ingest_batch_size:
+                await self._flush_ingest_batch(batch)
 
-    async def _call_ingest(self, records: List[ChunkRecord], raw: RawDocument) -> None:
-        func = self._ingest_func or self.pipeline.ingest
-        result = func(records, raw)
+    async def _flush_ingest_batch(self, batch: List[Tuple[List[ChunkRecord], RawDocument]]) -> None:
+        if not batch:
+            return
+        if self._ingest_many_func is None:
+            if self._ingest_func is None:
+                raise RuntimeError("IngestionRunner requires an ingest function")
+
+            async def _default_ingest_many(items: List[Tuple[List[ChunkRecord], RawDocument]]) -> None:
+                for records, raw in items:
+                    result = self._ingest_func(records, raw)
+                    if asyncio.iscoroutine(result):
+                        await result
+
+            self._ingest_many_func = _default_ingest_many
+
+        t0 = time.perf_counter()
+        result = self._ingest_many_func(batch)
         if asyncio.iscoroutine(result):
             await result
+        elapsed = time.perf_counter() - t0
+        _logger.info("[ingest] batch repos=%s elapsed=%.2fs", len(batch), elapsed)
+        for records, _raw in batch:
+            self._records_ingested += len(records)
+            self._writer_items += 1
+        batch.clear()
+        self._ingest_batch_size = max(1, limits.ingest_batch_size)

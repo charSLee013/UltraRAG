@@ -138,7 +138,10 @@ class BaseIngestionPipeline(abc.ABC):
 - **README 下载**：仅允许使用 API 返回的 `ReadMeContent` 字段或 `README.md` 文件元数据生成的下载链接；不得再维护多种候选文件名或兜底抓取逻辑。缺失时跳过并在日志记录。
 - **节流策略**：在 API 返回的单页数据上应用受控并发（推荐 Semaphore 16~32），并为每个 README 请求引入 0.1~3.5 秒随机延迟以减轻服务器压力；单次请求超时仍保持 60 秒。
 - **失败处理**：`list_models` 级别出现 429/5xx 时以指数退避整页重试；单个 README 下载失败则记录日志并跳过，不回滚整页；不会因为连续失败而提前停止。本轮成功的模型不得重复抓取。
-- **去重**：保持 `seen_repo_ids` / 数据库去重逻辑，若内容未变（依据 `content_hash`），则直接跳过，避免重复访问。
+- **去重（新版 “全集→差集” 策略）**：
+  - 规划阶段必须一次性拉取 **全部** `repo_id` 清单（允许分页拉取但结果需汇总），然后与 SQLite 中已存在的 `repo_id` 集合做差集，生成“待抓取列表”。规划阶段不得在分页循环中即时跳过或停止，确保 UI 与日志能准确显示 “page X/Y”。
+  - 差集列表确定后，再按列表顺序（可批量异步）请求 README；README 下载失败只影响当前条目，不重回规划阶段。
+  - ingest 成功后立即把新增 `repo_id`（=`content_hash`）写回集合，下一批次继续沿用，避免重复抓取。
 - **基线同步**：运行器在调度前会读取 SQLite `repo` 表中的历史 `content_hash`，作为基线集合注入来源；来源必须在完成 ingest 后把当次成功的 `content_hash` 追加回集合，确保下一批次继续沿用真实库存（避免重复抓取）。ModelScope source 当前令 `content_hash == repo_id`，但框架层契约仍以 `content_hash` 为准。
 - **抓取配额（严格定义）**：`MODELSCOPE_MODEL_SIZE` 控制“本轮最多成功抓取多少个 README”（以本次新增的 `content_hash` 计），值 ≤0 表示不限量。来源在统计是否达标时只计算本轮新增的成功数，基线集合仅用于去重。失败/跳过不计入成功数；若枚举所有页面仍未达到配额，必须记录告警。有限配额时，Hub API 的 `page_size` 建议取 `min(配额差值, 100)`；不限量则维持 100。
 
@@ -167,6 +170,7 @@ class IngestionRunner:
         self.fetch_kwargs = fetch_kwargs or {}
         self.metrics = metrics
         self.q_docs: asyncio.Queue[RawDocument | None] = asyncio.Queue(maxsize=2 * limits.max_workers)
+        self.q_ingest: asyncio.Queue[tuple[list[ChunkRecord], RawDocument] | None] = asyncio.Queue(maxsize=limits.max_workers)
         self.embed_sem = asyncio.Semaphore(limits.max_embed_concurrency)
         self.embed_budget = limits.max_embed_concurrency
         self._embed_func = embed_func
@@ -174,11 +178,15 @@ class IngestionRunner:
     async def run(self) -> StageMetrics:
         producer = asyncio.create_task(self._produce_docs())
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.limits.max_workers)]
+        writer = asyncio.create_task(self._writer())
         await producer
         await self.q_docs.join()
         for _ in workers:
             await self.q_docs.put(None)
         await asyncio.gather(*workers)
+        await self.q_ingest.join()
+        await self.q_ingest.put(None)
+        await writer
         return StageMetrics(stage="run", total_in=0, total_out=0)
 
     # 注：上述返回示例仅演示结构；真实实现需累积并返回文档与记录计数
@@ -199,9 +207,20 @@ class IngestionRunner:
                     chunk_max_size=self.limits.chunk_max_size,
                     embed=self._embed_with_limits,
                 )
-                await self.pipeline.ingest(records, raw)
+                await self.q_ingest.put((records, raw))
             finally:
                 self.q_docs.task_done()
+
+    async def _writer(self) -> None:
+        while True:
+            item = await self.q_ingest.get()
+            if item is None:
+                return
+            records, raw = item
+            try:
+                await self.pipeline.ingest(records, raw)
+            finally:
+                self.q_ingest.task_done()
 
     async def _embed_with_limits(self, drafts: list[ChunkDraft]) -> list[EmbeddedChunk]:
         results: list[EmbeddedChunk] = []
@@ -398,17 +417,17 @@ metrics = asyncio.run(runner.run())
 - Header：每个 HTTP 请求都带 `User-Agent: UltraRAG-Community-Agent/0.1` 和随机生成的 `X-Request-ID`，与官方 SDK 要求一致。
 - 其它阶段（Clean → Split → Embed → Ingest）完全继承基础 SOP 规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
 
-配套脚本 `script/ingest_modelscope_datasets_readmes.py` 与模型脚本共享同一集中写入通路，仅保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余写入流程不可配置、不可切换。示例：
+配套脚本 `ingestion_pipeline/ingest_modelscope_datasets_readmes.py` 与模型脚本共享同一集中写入通路，仅保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余写入流程不可配置、不可切换。示例：
 
 ```
 MODELSCOPE_DATASETS_TARGET=50 \
 EMBEDDING_API_URL=... \
 EMBEDDING_API_KEY=... \
 EMBEDDING_MODEL=... \
-.venv/bin/python script/ingest_modelscope_datasets_readmes.py
+.venv/bin/python ingestion_pipeline/ingest_modelscope_datasets_readmes.py
 ```
 
-模型 README 入库脚本 `script/ingest_modelscope_readmes.py` 同样复用这一单一写入通路；仓库中不再保留任何并行写入实现或隐藏开关。
+模型 README 入库脚本 `ingestion_pipeline/ingest_modelscope_readmes.py` 同样复用这一单一写入通路；仓库中不再保留任何并行写入实现或隐藏开关。
 
 ## 8. 实现目录建议
 

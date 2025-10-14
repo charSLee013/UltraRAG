@@ -7,7 +7,7 @@ import os
 import random
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncIterator, Iterable, List, Optional, Tuple
+from typing import AsyncIterator, Iterable, List, Optional, Tuple, Dict
 
 from dotenv import load_dotenv
 
@@ -66,13 +66,36 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
             target_successes = self.target_repo_count
 
         produced = 0
-        skip_hashes = set(self._existing_content_hashes)
+        delay_min, delay_max = self.delay_range
 
         async with ModelScopeClient(
             endpoint=self._endpoint,
             dataset_page_size=self.page_size,
             timeout=int(self.timeout),
         ) as client:
+            tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
+
+            async def build(owner: str, name: str) -> Optional[RawDocument]:
+                await asyncio.sleep(random.uniform(delay_min, delay_max))
+                text, source_url = await self._fetch_readme_text(client, owner, name)
+                if text is None:
+                    return None
+                payload = self._build_payload_dict(owner, name, source_url, text)
+                raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                repo_canon = f"datasets:{owner}/{name}"
+                return RawDocument(
+                    locator=SourceLocator(
+                        source_type=SourceType.DATASETS,
+                        owner_repo=f"{owner}/{name}",
+                        source_url=self._build_source_url(owner, name),
+                    ),
+                    repo_id=repo_canon,
+                    payload=raw_payload,
+                    fetched_at=datetime.now(timezone.utc),
+                    content_hash=repo_canon,
+                )
+
+            idx = 0
             async for entry in client.iter_datasets(limit=None):
                 owner_raw = entry.get("Namespace") or entry.get("Owner") or entry.get("CreatedBy")
                 name_raw = entry.get("Name")
@@ -82,42 +105,21 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                 name = str(name_raw).strip()
                 if not owner or not name:
                     continue
+                key = f"datasets:{owner}/{name}"
+                tasks.append((idx, key, asyncio.create_task(build(owner, name))))
+                idx += 1
 
-                repo_key = f"{owner}/{name}"
-                repo_canon = f"datasets:{repo_key}"
-                content_hash = repo_canon
-
-                if not force and content_hash in skip_hashes:
-                    self.logger.debug("[datasets.fetch] skip cached=%s", repo_key)
+            for i, key, task in sorted(tasks, key=lambda t: t[0]):
+                try:
+                    raw = await task
+                except Exception:
                     continue
-
-                text, source_url = await self._fetch_readme_text(client, owner, name)
-                if text is None:
-                    self.logger.debug("[datasets.fetch] missing README=%s", repo_key)
+                if raw is None:
                     continue
-
-                payload = self._build_payload_dict(owner, name, source_url, text)
-                raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-                raw = RawDocument(
-                    locator=SourceLocator(
-                        source_type=SourceType.DATASETS,
-                        owner_repo=repo_key,
-                        source_url=self._build_source_url(owner, name),
-                    ),
-                    repo_id=repo_canon,
-                    payload=raw_payload,
-                    fetched_at=datetime.now(timezone.utc),
-                    content_hash=content_hash,
-                )
-
-                skip_hashes.add(content_hash)
                 yield raw
                 produced += 1
-
                 if target_successes is not None and produced >= target_successes:
-                    break
-
-                await asyncio.sleep(random.uniform(*self.delay_range))
+                    return
 
     async def process(
         self,

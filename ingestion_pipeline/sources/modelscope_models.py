@@ -3,20 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncIterator, Dict, Iterable, List, Optional, Tuple
+from typing import AsyncIterator, Callable, Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from modelscope.hub.api import HubApi, ModelScopeConfig
 from modelscope.hub.file_download import get_file_download_url
 from requests import exceptions as requests_exc
 
-from ..base import BaseIngestionPipeline, EmbedFn
-from ..types import ChunkDraft, ChunkRecord, RawDocument, SourceLocator, SourceType
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from ingestion_pipeline.base import BaseIngestionPipeline, EmbedFn
+from ingestion_pipeline.types import ChunkDraft, ChunkRecord, RawDocument, SourceLocator, SourceType
 
 load_dotenv()
 
@@ -92,6 +100,39 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         except (TypeError, ValueError):
             return None
 
+    def list_catalog(
+        self,
+        *,
+        page_size: Optional[int] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[Tuple[str, str, Dict[str, object]]]:
+        effective_page_size = page_size if page_size is not None else self.api_page_size or 100
+        effective_page_size = max(1, min(int(effective_page_size), 100))
+        catalog: List[Tuple[str, str, Dict[str, object]]] = []
+        current_page = 1
+        total_count: Optional[int] = None
+        max_pages: Optional[int] = None
+
+        while True:
+            entries, page_total_count = self._list_models_page_with_retry(
+                current_page,
+                effective_page_size,
+            )
+            if total_count is None:
+                total_count = page_total_count
+                if total_count and total_count > 0:
+                    max_pages = math.ceil(total_count / effective_page_size)
+            if progress:
+                progress(current_page, max_pages or 0)
+            if not entries:
+                break
+            catalog.extend(entries)
+            if max_pages is not None and current_page >= max_pages:
+                break
+            current_page += 1
+
+        return catalog
+
     async def fetch(
         self,
         *,
@@ -124,104 +165,68 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         elif self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
 
-        seen_repo_ids: set[str] = set()
-        current_page = 1
         effective_page_size = page_size if page_size is not None else self.api_page_size
         if effective_page_size is None:
             effective_page_size = 100
         effective_page_size = max(1, min(int(effective_page_size), 100))
-        yielded_total = 0  # successful README fetches in this run
-        total_count: Optional[int] = None
 
-        while True:
-            entries, page_total_count = await asyncio.to_thread(
-                self._list_models_page_with_retry,
-                current_page,
-                effective_page_size,
+        catalog = await asyncio.to_thread(
+            self.list_catalog,
+            page_size=effective_page_size,
+            progress=None,
+        )
+
+        candidates: List[Tuple[str, str, Dict[str, object], str]] = []
+        seen_repo_ids: set[str] = set()
+        for owner, name, raw_item in catalog:
+            repo_id = f"models:{owner}/{name}"
+            if repo_id in seen_repo_ids:
+                continue
+            seen_repo_ids.add(repo_id)
+            content_hash = self._compute_content_hash(repo_id)
+            if not force and content_hash in skip_content_hashes:
+                continue
+            candidates.append((owner, name, raw_item, repo_id))
+
+        if target_successes is not None:
+            candidates = candidates[:target_successes]
+
+        yielded_total = 0
+        for owner, name, raw_item, repo_id in candidates:
+            locator = SourceLocator(
+                source_type=SourceType.MODELS,
+                owner_repo=f"{owner}/{name}",
+                source_url=self._build_source_url(owner, name),
             )
-            if total_count is None:
-                total_count = page_total_count
-            if not entries:
-                self.logger.info(
-                    "[modelscope.fetch] stopping at page=%s (no items returned)",
-                    current_page,
+            try:
+                raw_document = await self._build_raw_document_async(
+                    owner=owner,
+                    name=name,
+                    raw_item=raw_item,
+                    locator=locator,
+                    repo_id=repo_id,
                 )
-                break
-
-            yielded_on_page = 0
-            download_tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
-
-            for idx, (owner, name, raw_item) in enumerate(entries):
-                repo_id = f"models:{owner}/{name}"
-                if repo_id in seen_repo_ids:
-                    continue
-                seen_repo_ids.add(repo_id)
-
-                content_hash = self._compute_content_hash(repo_id)
-                if not force and content_hash in skip_content_hashes:
-                    continue
-
-                locator = SourceLocator(
-                    source_type=SourceType.MODELS,
-                    owner_repo=f"{owner}/{name}",
-                    source_url=self._build_source_url(owner, name),
+            except Exception as exc:
+                self.logger.debug(
+                    "[modelscope.fetch] repo=%s readme task raised err=%s",
+                    repo_id,
+                    exc,
                 )
-                task = asyncio.create_task(
-                    self._build_raw_document_async(
-                        owner=owner,
-                        name=name,
-                        raw_item=raw_item,
-                        locator=locator,
-                        repo_id=repo_id,
-                    )
-                )
-                download_tasks.append((idx, repo_id, task))
+                continue
 
-            for idx, repo_id, task in sorted(download_tasks, key=lambda entry: entry[0]):
-                try:
-                    raw_document = await task
-                except Exception as exc:
-                    self.logger.debug(
-                        "[modelscope.fetch] repo=%s readme task raised err=%s",
-                        repo_id,
-                        exc,
-                    )
-                    continue
+            if raw_document is None:
+                continue
 
-                if raw_document is None:
-                    continue
+            yield raw_document
+            yielded_total += 1
+            skip_content_hashes.add(raw_document.content_hash)
 
-                yield raw_document
-                yielded_on_page += 1
-                yielded_total += 1
-                skip_content_hashes.add(raw_document.content_hash)
-
-                if target_successes is not None and yielded_total >= target_successes:
-                    self.logger.info(
-                        "[modelscope.fetch] reached per-run quota=%s, stopping",
-                        target_successes,
-                    )
-                    return
-
-            # Do NOT stop on failures; continue paging until we reach the
-            # requested number of successful README fetches or exhaust pages.
-
-            self.logger.info(
-                "[modelscope.fetch] page=%s yielded=%s (total seen=%s)",
-                current_page,
-                yielded_on_page,
-                len(seen_repo_ids),
-            )
-            current_page += 1
-            # If API reports a finite total, stop once we've inspected that many entries
-            # without reaching the target successes. This still honours the success-based
-            # quota by only breaking after all pages are exhausted.
-            if total_count is not None and (current_page - 1) * effective_page_size >= total_count:
+            if target_successes is not None and yielded_total >= target_successes:
                 break
 
         if target_successes is not None and yielded_total < target_successes:
             self.logger.warning(
-                "[modelscope.fetch] exhausted available pages before meeting quota: yielded=%s target=%s",
+                "[modelscope.fetch] exhausted catalog before meeting quota: yielded=%s target=%s",
                 yielded_total,
                 target_successes,
             )

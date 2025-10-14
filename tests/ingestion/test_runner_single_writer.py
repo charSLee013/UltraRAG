@@ -108,3 +108,43 @@ def test_ingestion_runner_uses_single_writer() -> None:
     assert metrics.writer_items == len(docs)
     assert metrics.total_out == len(docs)
     assert metrics.max_queue_depth >= 1
+
+
+def test_ingestion_runner_batches_use_ingest_many() -> None:
+    docs = [
+        RawDocument(
+            locator=SourceLocator(
+                source_type=SourceType.MODELS,
+                owner_repo=f"owner/{i}",
+                source_url=f"https://example.com/{i}",
+            ),
+            repo_id=f"repo-{i}",
+            payload="{}",
+            fetched_at=datetime.now(timezone.utc),
+            content_hash=f"hash-{i}",
+        )
+        for i in range(5)
+    ]
+    pipeline = _StubPipeline(docs)
+    limits = PipelineRuntimeLimits(max_workers=2, max_embed_concurrency=2, chunk_max_size=1024, ingest_batch_size=2)
+
+    batch_log: list[list[str]] = []
+
+    def ingest_many(items):
+        batch_log.append([raw.repo_id for _, raw in items])
+
+    async def run() -> StageMetrics:
+        runner = IngestionRunner(
+            pipeline,
+            limits,
+            embed_func=_fake_embed,
+            ingest_many_func=ingest_many,
+        )
+        return await runner.run()
+
+    metrics = asyncio.run(run())
+
+    assert batch_log == [["repo-0", "repo-1"], ["repo-2", "repo-3"], ["repo-4"]]
+    assert metrics.total_in == len(docs)
+    assert metrics.total_out == len(docs)
+    assert metrics.writer_items == len(docs)
