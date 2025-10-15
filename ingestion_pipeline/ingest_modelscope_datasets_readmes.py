@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 
+import httpx
 from dotenv import load_dotenv
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +84,18 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except httpx.HTTPStatusError as exc:  # print HTTP code for upstream failures
+        resp = exc.response
+        code = resp.status_code if resp is not None else "?"
+        reason = getattr(resp, "reason_phrase", "") or ""
+        url = str(getattr(getattr(resp, "request", None), "url", ""))
+        print(f"[fatal] HTTP {code} {reason} url={url}", file=sys.stderr)
+        sys.exit(1)
+    except httpx.HTTPError as exc:
+        req = getattr(exc, "request", None)
+        url = str(getattr(req, "url", ""))
+        print(f"[fatal] httpx error: {exc.__class__.__name__} url={url}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:  # noqa: BLE001
         print(f"[fatal] {exc}", file=sys.stderr)
         sys.exit(1)
