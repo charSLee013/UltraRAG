@@ -3,25 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import random
-import time
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncIterator, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from modelscope.hub.api import HubApi, ModelScopeConfig
 from modelscope.hub.file_download import get_file_download_url
 from requests import exceptions as requests_exc
-
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from ingestion_pipeline.base import BaseIngestionPipeline, EmbedFn
 from ingestion_pipeline.types import ChunkDraft, ChunkRecord, RawDocument, SourceLocator, SourceType
@@ -30,51 +21,28 @@ load_dotenv()
 
 
 class ModelScopeModelsPipeline(BaseIngestionPipeline):
-    """Ingestion pipeline for models listed on ModelScope (modelscope.cn/models).
+    source_type: SourceType = SourceType.MODELS
+    """Model ingestion via official ModelScope Hub API.
 
-    The fetch stage paginates via the official Hub API (`HubApi.list_models`),
-    resolves each repository's README through `HubApi.get_model_files` and
-    `get_file_download_url`, and emits `RawDocument` entries once README content
-    is available. The constructor `page_size` argument (and its corresponding
-    `MODELSCOPE_MODEL_SIZE` env overrides) defines the
-    minimum number of successful repositories this pipeline should yield; the
-    Hub API pagination size is capped at 100 and derived from that target. The
-    process stage cleans README text, chunks it according to `chunk_max_size`,
-    and invokes the provided `EmbedFn`, returning `ChunkRecord` objects without
-    touching downstream stores. Ingest is delegated to the runner's
-    `SqliteChromaIngestor`.
+    - fetch: page loop (≤100), in-page concurrency + timeout, per-page yield
+    - process: clean → split → embed → assemble ChunkRecord
+    - ingest: delegated to Runner/SqliteChromaIngestor
     """
     def __init__(
         self,
         *,
-        page_size: Optional[int] = 100,
-        max_retries: int = 5,
-        initial_backoff: float = 1.0,
-        backoff_factor: float = 2.0,
+        target_repo_count: Optional[int] = None,
+        model_page_size: int = 100,
         timeout: float | None = 60.0,
-        existing_content_hashes: Optional[Iterable[str]] = None,
     ) -> None:
-        if page_size is not None and page_size < 1:
-            raise ValueError("page_size must be >= 1 or None")
-
-        if page_size is None:
-            self.target_repo_count: Optional[int] = None
-            self.api_page_size = 100
-        else:
-            self.target_repo_count = int(page_size)
-            self.api_page_size = min(self.target_repo_count, 100)
-
-        self.max_retries = max(1, max_retries)
-        self.initial_backoff = max(0.1, initial_backoff)
-        self.backoff_factor = max(1.0, backoff_factor)
-        self.list_timeout = float(timeout or 60.0)
-        self.readme_timeout = 60.0
-        self.delay_range = (0.1, 3.5)
-        self._existing_content_hashes = set(filter(None, existing_content_hashes or []))
+        self.target_repo_count = int(target_repo_count) if target_repo_count else None
+        self.timeout = float(timeout or 60.0)
+        self.page_size = max(1, min(int(model_page_size or 100), 100))
+        self.delay_range = (0.1, 1.5)
         self.logger = logging.getLogger("ingestion.sources.modelscope_models")
 
         endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or None
-        self._hub_api = HubApi(endpoint=endpoint, timeout=self.list_timeout, max_retries=self.max_retries)
+        self._hub_api = HubApi(endpoint=endpoint, timeout=self.timeout)
         token = os.environ.get("MODELSCOPE_API_TOKEN")
         if token:
             try:
@@ -82,154 +50,114 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             except Exception as exc:
                 self.logger.warning("[modelscope.fetch] login failed: %s", exc)
 
-    def register_ingested_hash(self, content_hash: str) -> None:
-        """Record a content_hash after a successful ingest to keep skip lists in sync."""
-        if content_hash:
-            self._existing_content_hashes.add(content_hash)
-
-    def estimate_total_models(self) -> Optional[int]:
-        """Return total models reported by the Hub API, or None on failure."""
-        try:
-            data = self._hub_api.list_models(owner_or_group="", page_number=1, page_size=1)
-        except Exception as exc:
-            self.logger.warning("[modelscope.fetch] failed to fetch total count: %s", exc)
-            return None
-        total = data.get("TotalCount")
-        try:
-            return int(total)
-        except (TypeError, ValueError):
-            return None
-
-    def list_catalog(
-        self,
-        *,
-        page_size: Optional[int] = None,
-        progress: Optional[Callable[[int, int], None]] = None,
-    ) -> List[Tuple[str, str, Dict[str, object]]]:
-        effective_page_size = page_size if page_size is not None else self.api_page_size or 100
-        effective_page_size = max(1, min(int(effective_page_size), 100))
-        catalog: List[Tuple[str, str, Dict[str, object]]] = []
-        current_page = 1
-        total_count: Optional[int] = None
-        max_pages: Optional[int] = None
-
-        while True:
-            entries, page_total_count = self._list_models_page_with_retry(
-                current_page,
-                effective_page_size,
-            )
-            if total_count is None:
-                total_count = page_total_count
-                if total_count and total_count > 0:
-                    max_pages = math.ceil(total_count / effective_page_size)
-            if progress:
-                progress(current_page, max_pages or 0)
-            if not entries:
-                break
-            catalog.extend(entries)
-            if max_pages is not None and current_page >= max_pages:
-                break
-            current_page += 1
-
-        return catalog
+    # 旧钩子与预扫描逻辑已移除
 
     async def fetch(
         self,
         *,
         force: bool = False,
-        page_size: Optional[int] = None,
-        **kwargs,
-    ) -> AsyncIterator[RawDocument]:
-        """Yield RawDocument entries for ModelScope models.
-
-        Args:
-            force: When False, entries whose repo_id is already present in
-                `existing_repo_ids` or `skip_repo_ids` (from kwargs) are skipped.
-            page_size: Optional override for the Hub API page size (1-100).
-            **kwargs: Supports `skip_repo_ids` (Iterable[str]) to skip repos in
-                addition to the constructor-level cache.
-        """
-
-        skip_content_hashes = set(self._existing_content_hashes)
-        skip_content_hashes.update(filter(None, kwargs.get("skip_content_hashes", [])))
-
-        max_docs_raw = kwargs.get("max_docs")
+        existing_hashes: Optional[set[str]] = None,
+        **_: object,
+    ) -> AsyncIterator[List[RawDocument]]:
         target_successes: Optional[int] = None
-        if max_docs_raw is not None:
-            try:
-                candidate = int(max_docs_raw)
-            except (TypeError, ValueError):
-                candidate = None
-            if candidate is not None and candidate > 0:
-                target_successes = candidate
-        elif self.target_repo_count is not None and self.target_repo_count > 0:
+        if self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
 
-        effective_page_size = page_size if page_size is not None else self.api_page_size
-        if effective_page_size is None:
-            effective_page_size = 100
-        effective_page_size = max(1, min(int(effective_page_size), 100))
+        existing_set: set[str] = set() if force else set(existing_hashes or set())
+        seen_hashes: set[str] = set()
 
-        catalog = await asyncio.to_thread(
-            self.list_catalog,
-            page_size=effective_page_size,
-            progress=None,
-        )
+        first = self._list_models_page(1)
+        total = int(first.get("TotalCount") or 0)
+        max_pages = (total + self.page_size - 1) // self.page_size if total else 0
 
-        candidates: List[Tuple[str, str, Dict[str, object], str]] = []
-        seen_repo_ids: set[str] = set()
-        for owner, name, raw_item in catalog:
-            repo_id = f"models:{owner}/{name}"
-            if repo_id in seen_repo_ids:
-                continue
-            seen_repo_ids.add(repo_id)
-            content_hash = self._compute_content_hash(repo_id)
-            if not force and content_hash in skip_content_hashes:
-                continue
-            candidates.append((owner, name, raw_item, repo_id))
+        produced = 0
+        page_concurrency = 16
 
-        if target_successes is not None:
-            candidates = candidates[:target_successes]
-
-        yielded_total = 0
-        for owner, name, raw_item, repo_id in candidates:
-            locator = SourceLocator(
-                source_type=SourceType.MODELS,
-                owner_repo=f"{owner}/{name}",
-                source_url=self._build_source_url(owner, name),
-            )
+        async def build(owner: str, name: str, raw_item: Dict[str, object]) -> Optional[RawDocument]:
+            await asyncio.sleep(random.uniform(*self.delay_range))
             try:
-                raw_document = await self._build_raw_document_async(
-                    owner=owner,
-                    name=name,
-                    raw_item=raw_item,
-                    locator=locator,
-                    repo_id=repo_id,
+                text, url = await asyncio.wait_for(
+                    self._fetch_readme_text(owner, name, raw_item),
+                    timeout=self.timeout,
                 )
-            except Exception as exc:
-                self.logger.debug(
-                    "[modelscope.fetch] repo=%s readme task raised err=%s",
-                    repo_id,
-                    exc,
-                )
-                continue
-
-            if raw_document is None:
-                continue
-
-            yield raw_document
-            yielded_total += 1
-            skip_content_hashes.add(raw_document.content_hash)
-
-            if target_successes is not None and yielded_total >= target_successes:
-                break
-
-        if target_successes is not None and yielded_total < target_successes:
-            self.logger.warning(
-                "[modelscope.fetch] exhausted catalog before meeting quota: yielded=%s target=%s",
-                yielded_total,
-                target_successes,
+            except asyncio.TimeoutError:
+                return None
+            except Exception:
+                return None
+            if not text:
+                return None
+            repo_canon = f"models:{owner}/{name}"
+            payload = self._build_payload_dict(owner, name, raw_item, url, text)
+            return RawDocument(
+                locator=SourceLocator(
+                    source_type=SourceType.MODELS,
+                    owner_repo=f"{owner}/{name}",
+                    source_url=self._build_source_url(owner, name),
+                ),
+                repo_id=repo_canon,
+                payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                fetched_at=datetime.now(timezone.utc),
+                content_hash=repo_canon,
             )
+
+        for page in range(1, (max_pages or 1) + 1):
+            data = first if page == 1 else self._list_models_page(page)
+            models = data.get("Models") or []
+            total_entries = len(models)
+            candidates: List[Tuple[str, str, Dict[str, object]]] = []
+            skipped = 0
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                owner = self._extract_owner(item)
+                name = self._extract_name(item)
+                if not owner or not name:
+                    continue
+                content_hash = f"models:{owner}/{name}"
+                if content_hash in existing_set or content_hash in seen_hashes:
+                    skipped += 1
+                    continue
+                candidates.append((owner, name, item))
+
+            self.logger.info(
+                "[models.fetch] page=%s entries=%s candidates=%s skipped=%s",
+                page,
+                total_entries,
+                len(candidates),
+                skipped,
+            )
+
+            if not candidates:
+                if max_pages and page >= max_pages:
+                    break
+                continue
+
+            sem = asyncio.Semaphore(page_concurrency)
+
+            async def run_task(owner: str, name: str, raw_item: Dict[str, object]) -> Optional[RawDocument]:
+                async with sem:
+                    return await build(owner, name, raw_item)
+
+            tasks = [asyncio.create_task(run_task(o, n, it)) for o, n, it in candidates]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            page_docs: List[RawDocument] = []
+            for res, (o, n, _it) in zip(results, candidates):
+                if isinstance(res, Exception) or res is None:
+                    continue
+                page_docs.append(res)
+                produced += 1
+                seen_hashes.add(res.content_hash)
+                if target_successes is not None and produced >= target_successes:
+                    break
+
+            self.logger.info("[models.fetch] page=%s succeeded=%s", page, len(page_docs))
+            if page_docs:
+                yield page_docs
+                if target_successes is not None and produced >= target_successes:
+                    return
+            if max_pages and page >= max_pages:
+                break
 
     async def process(
         self,
@@ -308,142 +236,40 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             "Ingest stage delegated to SqliteChromaIngestor via IngestionRunner."
         )
 
-    async def _build_raw_document_async(
-        self,
-        *,
-        owner: str,
-        name: str,
-        raw_item: Dict[str, object],
-        locator: SourceLocator,
-        repo_id: str,
-    ) -> Optional[RawDocument]:
-        await asyncio.sleep(random.uniform(*self.delay_range))
-        return await asyncio.to_thread(
-            self._build_raw_document_sync,
-            owner,
-            name,
-            raw_item,
-            locator,
-            repo_id,
+    async def _fetch_readme_text(self, owner: str, name: str, raw_item: Dict[str, object]) -> Tuple[Optional[str], Optional[str]]:
+        return await asyncio.to_thread(self._fetch_readme_text_sync, owner, name, raw_item)
+
+    def _extract_owner(self, raw_item: Dict[str, object]) -> str:
+        owner = (
+            raw_item.get("Path")
+            or raw_item.get("Owner")
+            or raw_item.get("OwnerName")
+            or raw_item.get("UserName")
+            or raw_item.get("Publisher")
+            or raw_item.get("OrganizationName")
+            or raw_item.get("User")
         )
+        if not owner and isinstance(raw_item.get("Organization"), dict):
+            org = raw_item["Organization"]
+            owner = org.get("Name") or org.get("FullName") or org.get("DisplayName")
+        if not owner:
+            owner = raw_item.get("CreatedBy")
+        return str(owner).strip() if isinstance(owner, str) else (owner or "")
 
-    def _build_raw_document_sync(
-        self,
-        owner: str,
-        name: str,
-        raw_item: Dict[str, object],
-        locator: SourceLocator,
-        repo_id: str,
-    ) -> Optional[RawDocument]:
-        readme_text, readme_url = self._fetch_readme_text_sync(owner, name, raw_item)
-        if readme_text is None:
-            self.logger.debug(
-                "[modelscope.fetch] skip repo=%s (no README found)",
-                repo_id,
-            )
-            return None
-
-        payload_dict = self._build_payload_dict(owner, name, raw_item, readme_url, readme_text)
-        raw_payload = json.dumps(payload_dict, ensure_ascii=False, sort_keys=True)
-        content_hash = self._compute_content_hash(repo_id)
-        return RawDocument(
-            locator=locator,
-            repo_id=repo_id,
-            payload=raw_payload,
-            fetched_at=datetime.now(timezone.utc),
-            content_hash=content_hash,
-        )
-
-    def _extract_model_entries(
-        self,
-        payload: Dict[str, object],
-    ) -> List[Tuple[str, str, Dict[str, object]]]:
-        container = payload
-        if isinstance(container, dict):
-            container = container.get("Data") or container.get("data") or container
-            if isinstance(container, dict):
-                container = container.get("Model") or container.get("model") or container
-
-        items: Optional[Iterable[object]] = None
-        if isinstance(container, dict):
-            for key in ("Models", "List", "Items", "models", "list", "items"):
-                value = container.get(key)
-                if isinstance(value, list):
-                    items = value
-                    break
-        elif isinstance(container, list):
-            items = container
-
-        result: List[Tuple[str, str, Dict[str, object]]] = []
-        if not items:
-            return result
-
-        for raw_item in items:
-            if not isinstance(raw_item, dict):
-                continue
-            owner = (
-                raw_item.get("Path")
-                or raw_item.get("Owner")
-                or raw_item.get("OwnerName")
-                or raw_item.get("UserName")
-                or raw_item.get("Publisher")
-                or raw_item.get("OrganizationName")
-                or raw_item.get("User")
-            )
-            if not owner:
-                organization = raw_item.get("Organization")
-                if isinstance(organization, dict):
-                    owner = (
-                        organization.get("Name")
-                        or organization.get("FullName")
-                        or organization.get("DisplayName")
-                    )
-            if not owner:
-                owner = raw_item.get("CreatedBy")
-            name = raw_item.get("ModelName") or raw_item.get("Name")
-            if not owner or not name:
-                continue
-            owner = str(owner).strip()
-            name = str(name).strip()
-            if not owner or not name:
-                continue
-            result.append((owner, name, raw_item))
-        return result
+    def _extract_name(self, raw_item: Dict[str, object]) -> str:
+        name = raw_item.get("ModelName") or raw_item.get("Name")
+        return str(name).strip() if isinstance(name, str) else (name or "")
 
     def _build_source_url(self, owner: str, name: str) -> str:
         return f"https://modelscope.cn/models/{owner}/{name}"
 
-    def _list_models_page_with_retry(
-        self,
-        page_number: int,
-        page_size: int,
-    ) -> Tuple[List[Tuple[str, str, Dict[str, object]]], int]:
-        backoff = self.initial_backoff
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                data = self._hub_api.list_models(
-                    owner_or_group="",
-                    page_number=page_number,
-                    page_size=page_size,
-                )
-                total = int(data.get("TotalCount") or 0)
-                container = {"Data": {"Models": data.get("Models") or []}}
-                entries = self._extract_model_entries(container)
-                return entries, total
-            except Exception as exc:
-                if attempt == self.max_retries:
-                    raise
-                wait_time = backoff * (1.0 + random.random())
-                self.logger.warning(
-                    "[modelscope.fetch] list_models page=%s attempt=%s err=%s; retrying in %.2fs",
-                    page_number,
-                    attempt,
-                    exc,
-                    wait_time,
-                )
-                time.sleep(wait_time)
-                backoff *= self.backoff_factor
-        raise RuntimeError(f"Unable to list models for page {page_number}")
+    def _list_models_page(self, page_number: int) -> Dict[str, object]:
+        data = self._hub_api.list_models(
+            owner_or_group="",
+            page_number=page_number,
+            page_size=self.page_size,
+        )
+        return {"Models": data.get("Models") or [], "TotalCount": int(data.get("TotalCount") or 0)}
 
     def _fetch_readme_text_sync(
         self,
@@ -551,9 +377,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         }
         return payload
 
-    def _compute_content_hash(self, repo_id: str) -> str:
-        """ModelScope 模型库使用 repo_id 作为稳定的 content_hash."""
-        return repo_id
+    # content_hash == repo_id for models; no separate helper needed
 
     def _make_chunk_uuid(self, repo_id: str, content_hash: str, index: int) -> str:
         seed = f"{repo_id}:{content_hash}:{index}"
