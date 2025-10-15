@@ -81,8 +81,9 @@ class StageMetrics:
 @dataclass(frozen=True)
 class PipelineRuntimeLimits:
     max_workers: int = 32                 # 并行“按文档”工人数量
-    max_embed_concurrency: int = 32       # 嵌入 API 同时在飞请求数
+    max_embed_concurrency: int = 512      # 嵌入 API 同时在飞请求数（实现默认）
     chunk_max_size: int = 32_768          # Split 生成单 chunk 的最大字符数
+    ingest_batch_size: int = 16           # 写入协程微批 flush 大小
 ```
 
 - `SourceLocator`：唯一的来源定位键，贯穿所有阶段与向量元数据。 
@@ -98,6 +99,8 @@ class PipelineRuntimeLimits:
 - 进程启动即调用 `dotenv.load_dotenv()` 读取仓库根目录 `.env`；配置仅从环境变量读取（加载 `.env` 之后）。
 - 不允许并行的配置来源或兜底策略；缺少必需键时必须 fail-fast 并输出缺项提示。
 - Runner 启动子进程时必须继承当前环境（`env=os.environ.copy()`），确保父子进程视图一致。
+
+必需：`EMBEDDING_API_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`。可选：`MODELSCOPE_DATASETS_TARGET`（≥1 时限制本轮成功抓取数）。
 
 ## 3. 单一管线抽象基类（ABC）
 
@@ -176,7 +179,7 @@ Runner 对应职责更新：
 
 ## 4. 运行器（Runner）与并发编排
 
-运行器仅依赖三项限额：`max_workers`（并行工人）、`max_embed_concurrency`（嵌入信号量令牌数）与 `chunk_max_size`（Split 的硬上限）。
+运行器仅依赖四项限额：`max_workers`（并行工人）、`max_embed_concurrency`（嵌入信号量令牌数）、`chunk_max_size`（Split 的硬上限）与 `ingest_batch_size`（写入微批大小）。
 单个有界队列 `Q_docs` 承载去重后的 `RawDocument`，每名工人调用 `process`（内部完成 Clean→Split→Embed→Tag）再执行 `ingest`；嵌入阶段获取信号量令牌并按 AIMD 规则自适应调节并发。
 
 ```python
@@ -220,8 +223,9 @@ class IngestionRunner:
     # （例如 total_in/total_out），以及并发轨迹等观测指标。
 
     async def _produce_docs(self) -> None:
-        async for raw in self.pipeline.fetch(force=self.fetch_force, **self.fetch_kwargs):
-            await self.q_docs.put(raw)
+        async for page in self.pipeline.fetch(force=self.fetch_force, **self.fetch_kwargs):
+            for raw in page:
+                await self.q_docs.put(raw)
 
     async def _worker(self, worker_id: int) -> None:
         while True:
@@ -257,7 +261,7 @@ class IngestionRunner:
                 async with self.embed_sem:
                     try:
                         embs = await self._embed_func(batch)
-                    except TransientEmbedError:
+                    except Exception:
                         self._embed_failure()
                         await asyncio.sleep(min(8, 2 ** attempt))
                         attempt += 1
@@ -427,7 +431,7 @@ metrics = asyncio.run(runner.run())
 - 子类通过实现 `fetch`/`process`/`ingest` 方法，与共享的 `limits` 复用 Runner 的并发/背压策略。
 - Runner 仅保留一个集中写入协程：所有 worker 将 `(records, raw)` 放入新建的 `AsyncQueue`，写入器按照入队顺序依次调用 `SqliteChromaIngestor.ingest()`；完成后才取下一条。**禁止任何代码绕过队列直接写入存储。**
 - `PipelineRuntimeLimits` 仍只维护并发和分片大小等核心参数；队列容量固定为 `2 * max_workers`，无额外开关或重试策略。
-- Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。写入器始终以“单条立即写”方式运行，不存在批次阈值或可配置 flush 行为。
+- Runner 的 `fetch_kwargs` 可用于分页、筛选等来源特定参数；`force=True` 时可用于全量重建。写入器为单协程串行写入，支持微批 flush，阈值由 `limits.ingest_batch_size` 控制。
 - 嵌入适配器使用 `httpx.AsyncClient`，向 `{EMBEDDING_API_URL.rstrip('/')}/embeddings` 发送 `POST`，Body 包含 `model`、`input`（批量文本）以及可选的 `encoding_format`、`dimensions`；必须提供 `Authorization: Bearer {EMBEDDING_API_KEY}`。严格保持最小实现，避免额外封装或“自动拼路径”造成路径重复。
 
 - 原子性：每个 repo 固定执行  
@@ -435,19 +439,20 @@ metrics = asyncio.run(runner.run())
   `Chroma: delete_repo → upsert_records` → `SQLite: commit`。如写入失败，立即抛出异常并回滚当前 repo；不得引入静默降级或备用路径。
 - 监控：`StageMetrics` 新增 `writer_items`（成功写入的 repo 数）与 `max_queue_depth`（运行期间的队列峰值），用于确认串行写入是否健康。
 
-### ModelScope 数据集来源实现
+### ModelScope 数据集来源实现(可以参考学习)
 
-`ingestion_pipeline/sources/datasets_pipeline.py` 复用同样的抽象，仅有的差异在 Fetch 阶段：
+`ingestion_pipeline/sources/datasets_pipeline.py` 复用同样抽象；Fetch 关键点：
 
-- 列表获取：通过官方 `/api/v1/dolphin/datasets` 接口（`ModelScopeClient.iter_datasets`）枚举全部数据集，使用 `Namespace/Name` 构造 `repo_id = datasets:{owner}/{name}`。不再支持传入 allow-list 或 namespace 过滤，确保唯一通路。
-- README 获取：调用 `/api/v1/datasets/{owner}/{name}` 读取 `ReadmeContent` 字段，缺失时直接跳过（并记录 warning），保持 `content_hash == repo_id` 的去重语义。
-- Header：每个 HTTP 请求都带 `User-Agent: UltraRAG-Community-Agent/0.1` 和随机生成的 `X-Request-ID`，与官方 SDK 要求一致。
-- 其它阶段（Clean → Split → Embed → Ingest）完全继承基础 SOP 规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
+- 分页：调用官方 `/api/v1/dolphin/datasets` 获取页数据；页内以 `Semaphore(N)` 并发抓取详情，并用 `asyncio.wait_for(timeout)` 保护。
+- 去重：`content_hash = repo_id = datasets:{owner}/{name}`；用 `existing_hashes` 与本页 `seen` 去重。
+- README：`/api/v1/datasets/{owner}/{name}` 读取 `ReadmeContent`；为空/缺失则跳过。
+- 产出：按页一次性 `yield list[RawDocument]`；达成 `MODELSCOPE_DATASETS_TARGET`（若设置）即停止。
+- Header：请求统一带 `User-Agent: UltraRAG-Community-Agent/0.1` 与随机 `X-Request-ID`。
+- 其它阶段（Clean → Split → Embed → Ingest）遵循通用规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
 
-配套脚本 `ingestion_pipeline/ingest_modelscope_datasets_readmes.py` 与模型脚本共享同一集中写入通路，仅保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余写入流程不可配置、不可切换。示例：
+配套脚本 `ingestion_pipeline/ingest_modelscope_datasets_readmes.py` 为生产入口，保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余流程固定、不可切换。示例：
 
 ```
-MODELSCOPE_DATASETS_TARGET=50 \
 EMBEDDING_API_URL=... \
 EMBEDDING_API_KEY=... \
 EMBEDDING_MODEL=... \
@@ -455,6 +460,8 @@ EMBEDDING_MODEL=... \
 ```
 
 模型 README 入库脚本 `ingestion_pipeline/ingest_modelscope_readmes.py` 同样复用这一单一写入通路；仓库中不再保留任何并行写入实现或隐藏开关。
+
+兼容性：旧钩子已失效。
 
 ## 8. 实现目录建议
 
