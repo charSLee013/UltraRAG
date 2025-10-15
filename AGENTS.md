@@ -14,6 +14,12 @@ UltraRAG’s Python package lives in `src/ultrarag`, containing the CLI entry (`
 - Rationale: prevents “parent can import, child cannot” failures (e.g., `ModuleNotFoundError: ultrarag/jsonlines`) caused by interpreter splits; ensures reproducible imports and dependency isolation.
 - Smoke guidance: if `.venv/` is absent, use the current interpreter consistently and install dependencies into it (`python -m pip install -e .`).
 
+### Environment Variables (.env) — Iron Rule
+- All Python entrypoints (CLI scripts, runners, servers, ingestion jobs, tests) MUST call `dotenv.load_dotenv()` at process start to load environment from `.env` in the repo root.
+- Env-first precedence: runtime configuration is read from environment variables (after loading `.env`). Code must not add parallel config files or fallback sources for the same keys.
+- Subprocesses inherit the loaded environment: when spawning MCP servers or helpers, pass `env=os.environ.copy()` so children see the same `.env` values.
+- No toggles: do not introduce optional flags that bypass `.env` loading; the single path is “load `.env`, then read env vars”. Missing required keys must fail-fast with clear messages (no silent defaults).
+
 ## Coding Style & Naming Conventions
 Follow standard Python 3.11 guidelines: four-space indents, double quotes for user-facing strings, and type hints on new public functions. Name modules and servers in lowercase with underscores (`retriever_server.py`), and align YAML step names with their tool intent (`retrieve_passages`, `rerank_answers`). Prefer extracting shared logic into `src/ultrarag/utils.py` instead of duplicating code inside server directories.
 

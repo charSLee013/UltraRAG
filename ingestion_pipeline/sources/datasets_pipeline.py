@@ -7,7 +7,7 @@ import os
 import random
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncIterator, Iterable, List, Optional, Tuple, Dict
+from typing import AsyncIterator, List, Optional, Tuple, Dict
 
 from dotenv import load_dotenv
 
@@ -20,6 +20,7 @@ load_dotenv()
 
 
 class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
+    source_type: SourceType = SourceType.DATASETS
     """Dataset ingestion pipeline using official ModelScope APIs.
 
     Fetch enumerates datasets via `/api/v1/dolphin/datasets` and retrieves README
@@ -33,29 +34,29 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
         target_repo_count: Optional[int] = None,
         dataset_page_size: int = 100,
         timeout: float | None = 60.0,
-        existing_content_hashes: Optional[Iterable[str]] = None,
     ) -> None:
         self.target_repo_count = int(target_repo_count) if target_repo_count else None
         self.timeout = float(timeout or 60.0)
         self.page_size = max(1, dataset_page_size)
         self.delay_range = (0.1, 3.5)
-        self._existing_content_hashes = set(filter(None, existing_content_hashes or []))
         self.logger = logging.getLogger("ingestion.sources.modelscope_datasets")
 
         endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or "https://modelscope.cn"
         self._endpoint = endpoint.rstrip("/")
 
     def register_ingested_hash(self, content_hash: str) -> None:
-        if content_hash:
-            self._existing_content_hashes.add(content_hash)
+        # Kept for backward compatibility — no-op under new Runner-provided dedupe
+        return None
 
     async def fetch(
         self,
         *,
         force: bool = False,
+        existing_hashes: Optional[set[str]] = None,
         max_docs: Optional[int] = None,
         **_: object,
-    ) -> AsyncIterator[RawDocument]:
+    ) -> AsyncIterator[List[RawDocument]]:
+        """Yield per-page lists of RawDocument with bounded in-page concurrency."""
         target_successes: Optional[int] = None
         if max_docs is not None:
             try:
@@ -65,21 +66,46 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
         elif self.target_repo_count is not None and self.target_repo_count > 0:
             target_successes = self.target_repo_count
 
+        # Step 1: build dedupe sets (provided by Runner)
+        existing_set: set[str] = set() if force else set(existing_hashes or set())
+        seen_hashes: set[str] = set()
+
         produced = 0
-        delay_min, delay_max = self.delay_range
+        delay_min, delay_max = (0.1, 1.5)  # gentle jitter per task within a page
+        page_concurrency = 16  # fixed page-level concurrency (no env toggles)
 
         async with ModelScopeClient(
             endpoint=self._endpoint,
             dataset_page_size=self.page_size,
             timeout=int(self.timeout),
         ) as client:
-            tasks: List[Tuple[int, str, asyncio.Task[Optional[RawDocument]]]] = []
+            # Compute total pages up front using the first page
+            first = await client._datasets_page(1)
+            total_remote = int(first.get("TotalCount") or 0)
+            max_pages = (total_remote + self.page_size - 1) // self.page_size if total_remote else 0
+
+            timeouts = 0
 
             async def build(owner: str, name: str) -> Optional[RawDocument]:
+                # per-task jitter and timeout wrapping around README fetch helper
                 await asyncio.sleep(random.uniform(delay_min, delay_max))
-                text, source_url = await self._fetch_readme_text(client, owner, name)
-                if text is None:
+                try:
+                    text, source_url = await asyncio.wait_for(
+                        self._fetch_readme_text(client, owner, name),
+                        timeout=int(self.timeout),
+                    )
+                except asyncio.TimeoutError:
+                    nonlocal timeouts
+                    timeouts += 1
+                    self.logger.info("[datasets.fetch] timeout owner=%s name=%s", owner, name)
                     return None
+                except Exception:
+                    self.logger.info("[datasets.fetch] failed owner=%s name=%s", owner, name)
+                    return None
+
+                if not text:
+                    return None
+
                 payload = self._build_payload_dict(owner, name, source_url, text)
                 raw_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
                 repo_canon = f"datasets:{owner}/{name}"
@@ -95,31 +121,92 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                     content_hash=repo_canon,
                 )
 
-            idx = 0
-            async for entry in client.iter_datasets(limit=None):
-                owner_raw = entry.get("Namespace") or entry.get("Owner") or entry.get("CreatedBy")
-                name_raw = entry.get("Name")
-                if not owner_raw or not name_raw:
-                    continue
-                owner = str(owner_raw).strip()
-                name = str(name_raw).strip()
-                if not owner or not name:
-                    continue
-                key = f"datasets:{owner}/{name}"
-                tasks.append((idx, key, asyncio.create_task(build(owner, name))))
-                idx += 1
+            # Page loop
+            for page in range(1, (max_pages or 1) + 1):
+                data = first if page == 1 else await client._datasets_page(page)
+                entries = data.get("Data") or []
+                candidates: list[tuple[str, str, str]] = []  # (repo_id, owner, name)
+                total_entries = len(entries)
+                skipped = 0
 
-            for i, key, task in sorted(tasks, key=lambda t: t[0]):
-                try:
-                    raw = await task
-                except Exception:
+                for item in entries:
+                    owner_raw = item.get("Namespace") or item.get("Owner") or item.get("CreatedBy")
+                    name_raw = item.get("Name")
+                    if not owner_raw or not name_raw:
+                        continue
+                    owner = str(owner_raw).strip()
+                    name = str(name_raw).strip()
+                    if not owner or not name:
+                        continue
+                    content_hash = self.compute_content_hash(owner, name)
+                    if not content_hash:
+                        continue
+                    if content_hash in existing_set or content_hash in seen_hashes:
+                        skipped += 1
+                        continue
+                    repo_id = content_hash  # identity hash for datasets
+                    candidates.append((repo_id, owner, name))
+
+                self.logger.info(
+                    "[datasets.fetch] page=%s entries=%s candidates=%s skipped=%s",
+                    page,
+                    total_entries,
+                    len(candidates),
+                    skipped,
+                )
+
+                # No candidates in this page
+                if not candidates:
+                    if max_pages and page >= max_pages:
+                        break
                     continue
-                if raw is None:
-                    continue
-                yield raw
-                produced += 1
-                if target_successes is not None and produced >= target_successes:
-                    return
+
+                sem = asyncio.Semaphore(page_concurrency)
+                timeouts = 0
+
+                async def run_task(owner: str, name: str) -> Optional[RawDocument]:
+                    async with sem:
+                        doc = await build(owner, name)
+                        if doc is None:
+                            # best-effort detection already logged in build; cannot distinguish error vs timeout here
+                            return None
+                        return doc
+
+                tasks = [asyncio.create_task(run_task(o, n)) for _rid, o, n in candidates]
+                # Gather page results; we purposely do not raise on individual failures
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                succeeded: int = 0
+                page_docs: List[RawDocument] = []
+                for res, (_rid, o, n) in zip(results, candidates):
+                    if isinstance(res, Exception):
+                        # already logged in build; skip
+                        continue
+                    if res is None:
+                        continue
+                    page_docs.append(res)
+                    succeeded += 1
+                    produced += 1
+                    seen_hashes.add(res.content_hash)
+                    if target_successes is not None and produced >= target_successes:
+                        # yield remaining of this page up to cap
+                        break
+
+                self.logger.info(
+                    "[datasets.fetch] page=%s succeeded=%s timeouts=%s", page, succeeded, timeouts
+                )
+
+                if page_docs:
+                    yield page_docs
+                    # If we've reached the target success count, stop fetching further pages
+                    if target_successes is not None and produced >= target_successes:
+                        return
+
+                # Move on to next page
+                if max_pages and page >= max_pages:
+                    break
+
+    # plan_total_pages removed per SOP update to avoid pre-pass latency
 
     async def process(
         self,
@@ -212,6 +299,13 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                 "clean_state": clean_state,
             },
         }
+
+    def compute_content_hash(self, owner: str, name: str) -> str:
+        owner_norm = (owner or "").strip()
+        name_norm = (name or "").strip()
+        if not owner_norm or not name_norm:
+            return ""
+        return f"datasets:{owner_norm}/{name_norm}"
 
     def _make_chunk_uuid(self, repo_id: str, content_hash: str, index: int) -> str:
         seed = f"{repo_id}:{content_hash}:{index}"

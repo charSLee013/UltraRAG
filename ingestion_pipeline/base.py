@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import abc
-from typing import AsyncIterable, Awaitable, Callable, List
+from typing import AsyncIterable, Awaitable, Callable, List, Set, Optional
 
-from .types import RawDocument, ChunkDraft, EmbeddedChunk, ChunkRecord
+from .types import RawDocument, ChunkDraft, EmbeddedChunk, ChunkRecord, SourceType
 
 
 # Embed function signature used by pipelines and runner.
@@ -11,8 +11,17 @@ EmbedFn = Callable[[List[ChunkDraft]], Awaitable[List[EmbeddedChunk]]]
 
 
 class BaseIngestionPipeline(abc.ABC):
+    # 每个具体管线必须声明所属来源层（datasets/models/...）
+    source_type: SourceType
+
     @abc.abstractmethod
-    async def fetch(self, *, force: bool = False, **kwargs) -> AsyncIterable[RawDocument]:
+    async def fetch(
+        self,
+        *,
+        force: bool = False,
+        existing_hashes: Optional[Set[str]] = None,
+        **kwargs,
+    ) -> AsyncIterable[List[RawDocument]]:
         ...
 
     @abc.abstractmethod

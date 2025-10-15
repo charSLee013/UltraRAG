@@ -4,7 +4,7 @@
 **负责人**：<待指定>
 
 ## 1. 目的
-- 为 UltraRAG 的所有知识来源建立统一的“获取 → 去重 → 清洗 → 切割 → 嵌入 → 标签 → 入库”范式。 
+- 为 UltraRAG 的所有知识来源建立统一的“获取 → 去重 → 清洗 → 切割 → 标签 → 嵌入 → 入库”范式。 
 - 以 `SourceLocator` 三元组为唯一定位键，贯穿 SQLite 与 Chroma，支撑可追溯、可审计的知识图谱。 
 - 通过抽象基类与异步编排，确保不同来源在不复制业务逻辑的情况下共享相同的质量闸与事务保证。 
 - 对齐《README Retriever SOP》《chroma_retriever_sop》和 Search-o1 中立原则，避免引入来源偏置或输出歧义。
@@ -88,18 +88,40 @@ class PipelineRuntimeLimits:
 - `SourceLocator`：唯一的来源定位键，贯穿所有阶段与向量元数据。 
 - `repo_id`：来源级主键，可按需重写（例如模型分支差异化）；必须与 SQLite `repo.repo_id` 一致。 
 - `content_hash`：由获取或专用策略生成，用于识别文档内容变化（例如对正文取摘要或版本号），**尽可能保持稳定**。每个来源可以自定义策略：比如 ModelScope 模型库（https://modelscope.cn/models）就将 `content_hash` 显式设为 `repo_id`，以避免 README 下载 URL 的临时 `auth_key` 导致哈希抖动。 
+- `source_type` 持久化规范（重要）：写入 SQLite 与 Chroma 元数据时，必须存放枚举的 `.value`（如 `"datasets"`），而不是 `str(Enum)`（如 `"SourceType.DATASETS"`）。Runner 在读取时同样使用 `.value` 过滤，避免因枚举字符串化差异导致去重集为空。
 - `ChunkDraft.index`：切割阶段生成的稳定序号，用于 deterministic 重放与批量删除。 
 - `ChunkRecord.chunk_uuid`：由标签阶段统一生成，作为 SQLite `chunks` 主键与 Chroma `id`。 
 - `StageMetrics`：统计各阶段的吞吐与异常，便于监控与验收。
 - `PipelineRuntimeLimits`：运行时仅保留三个必须控制项——并行工人数、嵌入并发上限、chunk 最大长度；所有背压/限流逻辑围绕这三项展开。
 
+### 3.0 环境加载（.env）— 铁律
+- 进程启动即调用 `dotenv.load_dotenv()` 读取仓库根目录 `.env`；配置仅从环境变量读取（加载 `.env` 之后）。
+- 不允许并行的配置来源或兜底策略；缺少必需键时必须 fail-fast 并输出缺项提示。
+- Runner 启动子进程时必须继承当前环境（`env=os.environ.copy()`），确保父子进程视图一致。
+
 ## 3. 单一管线抽象基类（ABC）
+
+为支持“按来源类型的去重”与“按页拉取”，抽象基类的契约统一如下：
 
 ```python
 class BaseIngestionPipeline(abc.ABC):
+    # 所属来源层，必须显式声明，用于 Runner 选择正确的去重集
+    source_type: SourceType
+
     @abc.abstractmethod
-    async def fetch(self, *, force: bool = False, **kwargs) -> AsyncIterable[RawDocument]:
-        ...  # 产出 RawDocument（含 locator/repo_id/content_hash/payload）
+    async def fetch(
+        self,
+        *,
+        force: bool = False,
+        existing_hashes: set[str] | None = None,
+        **kwargs,
+    ) -> AsyncIterable[list[RawDocument]]:
+        """
+        按页产出：每次 yield 为一页内成功构建的 RawDocument 列表。
+        - force=True 时，忽略去重集（existing_hashes 视为 set()）。
+        - existing_hashes：仅包含本 source_type 的 content_hash。
+        - 不得返回空列表（当页全失败时跳过该页）。
+        """
 
     @abc.abstractmethod
     async def process(
@@ -109,8 +131,7 @@ class BaseIngestionPipeline(abc.ABC):
         chunk_max_size: int,
         embed: EmbedFn,              # 由 Runner 注入，内部已做并发/令牌/退避
     ) -> list[ChunkRecord]:
-        ...  # RawDocument In → List[ChunkRecord] Out（Clean→Split→embed(...)→Tag）
-
+        """RawDocument In → List[ChunkRecord] Out（Clean→Split→embed(...)→Tag）。"""
 
     @abc.abstractmethod
     async def ingest(
@@ -118,8 +139,14 @@ class BaseIngestionPipeline(abc.ABC):
         records: list[ChunkRecord],
         raw: RawDocument,
     ) -> None:
-        ...  # SQLite 事务替换 + Chroma delete/upsert（带重试/补偿）
+        """SQLite 事务替换 + 向量库删除/写入（带重试/补偿）。"""
 ```
+
+Runner 对应职责更新：
+- 启动阶段读取 SQLite 中本 source_type 的 content_hash 集合（例如 datasets 使用 `datasets:{owner}/{name}` 作为身份哈希）；`force=True` 则传入空集。
+- 以 `existing_hashes` 显式参数调用 `pipeline.fetch(...)`；不再通过构造函数隐式注入去重集。
+- 逐页消费 `List[RawDocument]` 并扁平化进入处理队列；其它阶段（process/embed/ingest）不变。
+- 读取去重集的 SQL 必须使用 `pipeline.source_type.value` 作为过滤条件（与持久化约定一致）。
 
 - 阶段顺序固定：**Fetch（含去重）→ Process（Clean→Split→Embed→Tag）→ Ingest**。 
 - 抽象基类只定义业务契约，不承担运行参数或并发配置。

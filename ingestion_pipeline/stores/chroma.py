@@ -36,7 +36,7 @@ class ChromaStore:
                 "repo_id": r.repo_id,
                 "content_hash": r.content_hash,
                 "chunk_index": r.chunk_index,
-                "source_type": str(r.locator.source_type),
+                "source_type": r.locator.source_type.value,
                 "owner_repo": r.locator.owner_repo,
                 "source_url": r.locator.source_url,
                 "fetched_at": (r.fetched_at.isoformat() if getattr(r, "fetched_at", None) else None),

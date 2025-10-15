@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, List, Optional, Tuple
-import logging, time
+from typing import Awaitable, Callable, List, Optional, Tuple, Set
+import logging
+import time
 
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 from .base import BaseIngestionPipeline, EmbedFn
 from .limits import PipelineRuntimeLimits
 from .types import RawDocument, ChunkDraft, EmbeddedChunk, ChunkRecord, StageMetrics
+from .stores.sqlite import SQLiteStore
 
 
 load_dotenv()
@@ -48,6 +51,7 @@ class IngestionRunner:
         self._embed_trace: list[int] = [self.embed_budget]
         self._writer_items = 0
         self._max_ingest_queue = 0
+        self._ingest_batch_size = max(1, self.limits.ingest_batch_size)
 
     async def run(self) -> StageMetrics:
         producer = asyncio.create_task(self._produce_docs())
@@ -73,15 +77,41 @@ class IngestionRunner:
             max_queue_depth=self._max_ingest_queue,
         )
 
+    def _load_existing_hashes(self) -> Set[str]:
+        store = SQLiteStore()
+        try:
+            with store.conn as conn:
+                cur = conn.execute(
+                    "SELECT content_hash FROM repo WHERE source_type=?",
+                    (self.pipeline.source_type.value,),
+                )
+                return {row[0] for row in cur.fetchall() if row and row[0]}
+        finally:
+            store.close()
+
     async def _produce_docs(self) -> None:
-        async for raw in self.pipeline.fetch(force=self.fetch_force, **self.fetch_kwargs):
-            _logger.info(
-                "[fetch] queued repo=%s source=%s",
-                raw.repo_id,
-                raw.locator.source_url,
-            )
-            await self.q_docs.put(raw)
-            self._docs_produced += 1
+        existing = set() if self.fetch_force else self._load_existing_hashes()
+        bar = tqdm(total=None, desc="fetch", unit="page", leave=False)
+        try:
+            async for page in self.pipeline.fetch(
+                force=self.fetch_force, existing_hashes=existing, **self.fetch_kwargs
+            ):
+                if not page:
+                    bar.update(1)
+                    bar.set_postfix(items=0)
+                    continue
+                for raw in page:
+                    _logger.debug(
+                        "[fetch] queued repo=%s source=%s",
+                        raw.repo_id,
+                        raw.locator.source_url,
+                    )
+                    await self.q_docs.put(raw)
+                    self._docs_produced += 1
+                bar.update(1)
+                bar.set_postfix(items=len(page))
+        finally:
+            bar.close()
 
     async def _worker(self, worker_id: int) -> None:
         while True:
@@ -175,4 +205,4 @@ class IngestionRunner:
             self._records_ingested += len(records)
             self._writer_items += 1
         batch.clear()
-        self._ingest_batch_size = max(1, limits.ingest_batch_size)
+        self._ingest_batch_size = max(1, self.limits.ingest_batch_size)

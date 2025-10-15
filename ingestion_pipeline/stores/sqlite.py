@@ -75,7 +75,7 @@ class SQLiteStore:
                     r.content_hash,
                     r.chunk_index,
                     r.text,
-                    str(r.locator.source_type),
+                    r.locator.source_type.value,
                     r.locator.owner_repo,
                     r.locator.source_url,
                     json.dumps(r.embedding, ensure_ascii=False),
@@ -99,7 +99,7 @@ class SQLiteStore:
             """,
             (
                 raw.repo_id,
-                str(raw.locator.source_type),
+                raw.locator.source_type.value,
                 raw.locator.owner_repo,
                 raw.locator.source_url,
                 raw.content_hash,
