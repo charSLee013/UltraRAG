@@ -279,10 +279,17 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     ) -> Tuple[Optional[str], Optional[str]]:
         repo_id = f"{owner}/{name}"
 
-        api_readme = raw_item.get("ReadMeContent") if isinstance(raw_item, dict) else None
-        if isinstance(api_readme, str) and api_readme.strip():
-            text = api_readme.strip()
-            return text, None
+        # 1) Prefer official model detail ReadMeContent (reject known placeholder templates)
+        try:
+            detail = self._hub_api.get_model(model_id=repo_id, endpoint=self._hub_api.endpoint)
+            if isinstance(detail, dict):
+                api_readme = detail.get("ReadMeContent") or detail.get("ReadmeContent")
+                if isinstance(api_readme, str):
+                    text0 = api_readme.strip()
+                    if text0 and "当前模型的贡献者未提供更加详细" not in text0:
+                        return text0, None
+        except Exception:
+            pass
 
         try:
             revision = self._hub_api.get_valid_revision(
@@ -317,9 +324,11 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             if not isinstance(file_meta, dict):
                 continue
             path = str(file_meta.get("Path") or "").strip()
-            if path.lower() == "readme.md":
+            pl = path.lower()
+            if pl in {"readme.md", "readme.markdown", "readme.rst", "readme.txt"}:
                 readme_entry = file_meta
                 break
+        # No README file
         if readme_entry is None:
             return None, None
 
@@ -336,7 +345,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                 download_url,
                 headers=headers,
                 cookies=ModelScopeConfig.get_cookies(),
-                timeout=self.readme_timeout,
+                timeout=self.timeout,
             )
             resp.raise_for_status()
         except requests_exc.RequestException as exc:

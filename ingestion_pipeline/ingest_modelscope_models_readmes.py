@@ -9,13 +9,17 @@ import sys
 import httpx
 from dotenv import load_dotenv
 
-from ingestion_pipeline.embed.adapters import get_default_embed_fn
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from ingestion_pipeline.embed.adapters import get_default_embed_fn  # noqa: E402
 from ingestion_pipeline.limits import PipelineRuntimeLimits
 from ingestion_pipeline.runner import IngestionRunner
-from ingestion_pipeline.sources.modelscope_models import ModelScopeModelsPipeline
-from ingestion_pipeline.stores.chroma import ChromaStore
-from ingestion_pipeline.stores.ingestor import SqliteChromaIngestor
-from ingestion_pipeline.stores.sqlite import SQLiteStore
+from ingestion_pipeline.sources.modelscope_models import ModelScopeModelsPipeline  # noqa: E402
+from ingestion_pipeline.stores.chroma import ChromaStore  # noqa: E402
+from ingestion_pipeline.stores.ingestor import SqliteChromaIngestor  # noqa: E402
+from ingestion_pipeline.stores.sqlite import SQLiteStore  # noqa: E402
 
 
 load_dotenv()

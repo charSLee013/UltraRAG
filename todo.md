@@ -73,3 +73,43 @@ Scope: ingestion_pipeline/ingest_modelscope_models_readmes.py and sources/models
 
 Notes:
 - Ensure entry script path remains `ingestion_pipeline/ingest_modelscope_models_readmes.py`; remove any stale/renamed duplicates after refactor.
+
+## ModelScope 模型 README 获取（强约束，官方路径，仅此一条）
+
+- 官方顺序（禁止自由发挥 / 禁止多路径）：
+  - 第一步：`HubApi.get_model(model_id)`，读取详情里的 `ReadMeContent`。
+  - 第二步（仅当第一步缺失或判定为“站点占位模板”时）：
+    - 调用 `HubApi.get_model_files(model_id, revision, recursive=True)`；
+    - 选择 `README.md`；
+    - 通过 `get_file_download_url(...)` 获取直链并下载正文（`Accept: text/plain`）。
+  - 列表接口 `list_models` 仅用于枚举，不得作为 README 正文来源（其 `ReadMeContent` 允许为空/占位/摘要，不可靠）。
+
+- 占位模板判定（最小必要，避免把模板当正文）：
+  - 关键片段命中即判定占位（例如“当前模型的贡献者未提供更加详细”“SDK下载”“Git下载”“模型文件…页面获取”以及浅灰提示段）。
+  - 判定为占位后必须走 README.md 直链下载路径；不得保留“兼容/兜底”模式。
+
+- 请求头与防爬：
+  - 每次请求都重建唯一 `X-Request-ID`（UUID v4），禁止复用；
+  - `Accept: text/plain, */*`；必要时附带 `ModelScopeConfig.get_cookies()`；
+  - 仅使用官方域名与 Hub API；不引入抓取、镜像或私有直链。
+
+- 编码风格与约束：
+  - 绝不防御式编程，不留“TODO 兜底/备用版本/调试开关”；
+  - 变更先更 SOP 再实现；
+  - 严格遵循 AGENTS.md：Official API First / Single Path Only / 无兜底 / 可观测。
+
+## 移除错误逻辑（立即执行，留下 TODO 等待后续实现）
+
+- 删除/禁用错误路径（ingestion_pipeline/sources/modelscope_models.py）：
+  - 移除对 `list_models` 返回项 `raw_item["ReadMeContent"]` 的任何正文使用；该字段仅用于枚举，不得入库。
+  - 在 `_fetch_readme_text_sync` 顶部，删除“非空即返回”的分支；改为占位：
+    - `# TODO(models): 实现 get_model(model_id).ReadMeContent →（占位判定）→ README.md 直链下载`
+    - 临时返回 `None, None`，让上层逻辑跳过该条（不入库伪内容）。
+  - 保留分页与去重逻辑不变（Runner 注入 existing_hashes，页内并发/超时仍生效）。
+
+- Header 重建（占位）：
+  - 在后续实现时，于每次 Hub API 请求前重建 `X-Request-ID`（UUID v4）；本阶段仅在 `# TODO` 中标注，不先落代码以免遗留临时实现。
+
+- 验收（移除阶段）：
+  - 运行 MODELSCOPE_MODELS_TARGET=1 时，如未完成新路径实现，应不写入 models:% 记录（因为 `fetch` 对该条返回 None）。
+  - 运行 datasets 脚本不受影响；models 脚本的 README 获取将在后续步骤按官方路径补齐后再恢复入库。
