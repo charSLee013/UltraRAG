@@ -10,9 +10,8 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from modelscope.hub.api import HubApi, ModelScopeConfig
-from modelscope.hub.file_download import get_file_download_url
-from requests import exceptions as requests_exc
+from modelscope.hub.api import ModelScopeConfig
+import httpx
 
 from ingestion_pipeline.base import BaseIngestionPipeline, EmbedFn
 from ingestion_pipeline.types import ChunkDraft, ChunkRecord, RawDocument, SourceLocator, SourceType
@@ -43,16 +42,8 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         self.delay_range = (0.1, 1.5)
         self.logger = logging.getLogger("ingestion.sources.modelscope_models")
 
-        endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or None
-        self._hub_api = HubApi(endpoint=endpoint, timeout=self.timeout)
-        token = os.environ.get("MODELSCOPE_API_TOKEN")
-        if token:
-            try:
-                self._hub_api.login(token, endpoint=self._hub_api.endpoint)
-            except Exception as exc:
-                self.logger.warning("[modelscope.fetch] login failed: %s", exc)
-
-    # 旧钩子与预扫描逻辑已移除
+        endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or "https://modelscope.cn"
+        self._endpoint = endpoint.rstrip("/")
 
     async def fetch(
         self,
@@ -68,7 +59,8 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         existing_set: set[str] = set() if force else set(existing_hashes or set())
         seen_hashes: set[str] = set()
 
-        first = self._list_models_page(1)
+        # Page 1 to derive total count
+        first = await self._list_models_page_http(1)
         total = int(first.get("TotalCount") or 0)
         max_pages = (total + self.page_size - 1) // self.page_size if total else 0
 
@@ -79,7 +71,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             await asyncio.sleep(random.uniform(*self.delay_range))
             try:
                 text, url = await asyncio.wait_for(
-                    self._fetch_readme_text(owner, name, raw_item),
+                    self._fetch_readme_text_http(owner, name),
                     timeout=self.timeout,
                 )
             except asyncio.TimeoutError:
@@ -103,7 +95,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             )
 
         for page in range(1, (max_pages or 1) + 1):
-            data = first if page == 1 else self._list_models_page(page)
+            data = first if page == 1 else await self._list_models_page_http(page)
             models = data.get("Models") or []
             total_entries = len(models)
             candidates: List[Tuple[str, str, Dict[str, object]]] = []
@@ -238,8 +230,49 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             "Ingest stage delegated to SqliteChromaIngestor via IngestionRunner."
         )
 
-    async def _fetch_readme_text(self, owner: str, name: str, raw_item: Dict[str, object]) -> Tuple[Optional[str], Optional[str]]:
-        return await asyncio.to_thread(self._fetch_readme_text_sync, owner, name, raw_item)
+    async def _fetch_readme_text_http(self, owner: str, name: str) -> Tuple[Optional[str], Optional[str]]:
+        # One-off connection per call
+        cookies = ModelScopeConfig.get_cookies()
+        headers = {
+            "User-Agent": "UltraRAG-Community-Agent/0.1",
+            "X-Request-ID": uuid.uuid4().hex,
+            "Accept": "application/json",
+            "Connection": "close",
+        }
+        files_url = f"{self._endpoint}/api/v1/models/{owner}/{name}/repo/files"
+        params = {"Recursive": "true"}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r1 = await client.get(files_url, headers=headers, cookies=cookies, params=params)
+            r1.raise_for_status()
+            payload = r1.json()
+        files = (payload.get("Data", {}) or {}).get("Files", [])
+        readme_path = None
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("Path") or "").strip().lower()
+            if p in {"readme.md", "readme.markdown", "readme.rst", "readme.txt"}:
+                readme_path = item.get("Path")
+                break
+        if not readme_path:
+            return None, None
+        headers_text = {
+            "User-Agent": "UltraRAG-Community-Agent/0.1",
+            "X-Request-ID": uuid.uuid4().hex,
+            "Accept": "text/plain, */*",
+            "Connection": "close",
+        }
+        content_url = f"{self._endpoint}/api/v1/models/{owner}/{name}/repo"
+        params2 = {"FilePath": readme_path}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r2 = await client.get(content_url, headers=headers_text, cookies=cookies, params=params2)
+            r2.raise_for_status()
+            text = (r2.text or "").strip()
+            if not text:
+                return None, None
+            if "当前模型的贡献者未提供更加详细" in text:
+                return None, None
+            return text, str(r2.request.url)
 
     def _extract_owner(self, raw_item: Dict[str, object]) -> str:
         owner = (
@@ -265,114 +298,23 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
     def _build_source_url(self, owner: str, name: str) -> str:
         return f"https://modelscope.cn/models/{owner}/{name}"
 
-    def _list_models_page(self, page_number: int) -> Dict[str, object]:
-        data = self._hub_api.list_models(
-            owner_or_group="",
-            page_number=page_number,
-            page_size=self.page_size,
-        )
+    async def _list_models_page_http(self, page_number: int) -> Dict[str, object]:
+        url = f"{self._endpoint}/api/v1/models"
+        cookies = ModelScopeConfig.get_cookies()
+        headers = {
+            "User-Agent": "UltraRAG-Community-Agent/0.1",
+            "X-Request-ID": uuid.uuid4().hex,
+            "Accept": "application/json",
+            "Connection": "close",
+        }
+        body = {"Path": "", "PageNumber": page_number, "PageSize": self.page_size}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.put(url, headers=headers, cookies=cookies, json=body)
+            resp.raise_for_status()
+            data = resp.json().get("Data") or {}
         return {"Models": data.get("Models") or [], "TotalCount": int(data.get("TotalCount") or 0)}
 
-    def _fetch_readme_text_sync(
-        self,
-        owner: str,
-        name: str,
-        raw_item: Dict[str, object],
-    ) -> Tuple[Optional[str], Optional[str]]:
-        repo_id = f"{owner}/{name}"
-
-        # 1) Prefer official model detail ReadMeContent (reject known placeholder templates)
-        #    Additionally enforce a hard Stars threshold to skip low-signal repos
-        try:
-            detail = self._hub_api.get_model(model_id=repo_id, endpoint=self._hub_api.endpoint)
-            if isinstance(detail, dict):
-                # Skip small models (Stars < self._min_stars) without downloading README
-                try:
-                    stars = int(detail.get("Stars") or 0)
-                except Exception:
-                    stars = 0
-                if stars < self._min_stars:
-                    return None, None
-                api_readme = detail.get("ReadMeContent") or detail.get("ReadmeContent")
-                if isinstance(api_readme, str):
-                    text0 = api_readme.strip()
-                    if text0 and "当前模型的贡献者未提供更加详细" not in text0:
-                        return text0, None
-        except Exception:
-            pass
-
-        try:
-            revision = self._hub_api.get_valid_revision(
-                repo_id,
-                endpoint=self._hub_api.endpoint,
-            )
-        except Exception as exc:
-            self.logger.debug(
-                "[modelscope.fetch] repo=%s failed to resolve revision: %s",
-                repo_id,
-                exc,
-            )
-            return None, None
-
-        try:
-            files = self._hub_api.get_model_files(
-                model_id=repo_id,
-                revision=revision,
-                recursive=True,
-                endpoint=self._hub_api.endpoint,
-            )
-        except Exception as exc:
-            self.logger.debug(
-                "[modelscope.fetch] repo=%s failed to list files: %s",
-                repo_id,
-                exc,
-            )
-            return None, None
-
-        readme_entry = None
-        for file_meta in files:
-            if not isinstance(file_meta, dict):
-                continue
-            path = str(file_meta.get("Path") or "").strip()
-            pl = path.lower()
-            if pl in {"readme.md", "readme.markdown", "readme.rst", "readme.txt"}:
-                readme_entry = file_meta
-                break
-        # No README file
-        if readme_entry is None:
-            return None, None
-
-        download_url = get_file_download_url(
-            model_id=repo_id,
-            file_path=readme_entry["Path"],
-            revision=revision,
-            endpoint=self._hub_api.endpoint,
-        )
-        headers = self._hub_api.builder_headers(dict(self._hub_api.headers))
-        headers["Accept"] = "text/plain, */*"
-        try:
-            resp = self._hub_api.session.get(
-                download_url,
-                headers=headers,
-                cookies=ModelScopeConfig.get_cookies(),
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-        except requests_exc.RequestException as exc:
-            self.logger.debug(
-                "[modelscope.fetch] repo=%s failed to download README: %s",
-                repo_id,
-                exc,
-            )
-            return None, None
-
-        text = resp.text.strip()
-        # Skip placeholder templates even if downloaded from README.md
-        if "当前模型的贡献者未提供更加详细" in text:
-            return None, None
-        if not text:
-            return None, None
-        return text, download_url
+    # Legacy sync README helper removed; single-path httpx is used
 
     def _build_payload_dict(
         self,
