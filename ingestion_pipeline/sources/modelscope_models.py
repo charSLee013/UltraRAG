@@ -35,6 +35,8 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         model_page_size: int = 100,
         timeout: float | None = 60.0,
     ) -> None:
+        # Hard threshold: only ingest models with Stars >= 2
+        self._min_stars = 2
         self.target_repo_count = int(target_repo_count) if target_repo_count else None
         self.timeout = float(timeout or 60.0)
         self.page_size = max(1, min(int(model_page_size or 100), 100))
@@ -280,9 +282,17 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         repo_id = f"{owner}/{name}"
 
         # 1) Prefer official model detail ReadMeContent (reject known placeholder templates)
+        #    Additionally enforce a hard Stars threshold to skip low-signal repos
         try:
             detail = self._hub_api.get_model(model_id=repo_id, endpoint=self._hub_api.endpoint)
             if isinstance(detail, dict):
+                # Skip small models (Stars < self._min_stars) without downloading README
+                try:
+                    stars = int(detail.get("Stars") or 0)
+                except Exception:
+                    stars = 0
+                if stars < self._min_stars:
+                    return None, None
                 api_readme = detail.get("ReadMeContent") or detail.get("ReadmeContent")
                 if isinstance(api_readme, str):
                     text0 = api_readme.strip()
@@ -357,6 +367,9 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
             return None, None
 
         text = resp.text.strip()
+        # Skip placeholder templates even if downloaded from README.md
+        if "当前模型的贡献者未提供更加详细" in text:
+            return None, None
         if not text:
             return None, None
         return text, download_url

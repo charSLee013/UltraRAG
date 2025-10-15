@@ -76,6 +76,9 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Quiet ModelScope SDK noise: hide revision warnings and missing repo errors
+    for name in ("modelscope", "modelscope.hub", "modelscope.hub.api"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
     asyncio.run(_run())
 
 
