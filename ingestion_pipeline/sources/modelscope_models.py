@@ -129,6 +129,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                 total_entries = len(models)
                 candidates: List[Tuple[str, str, Dict[str, object]]] = []
                 skipped = 0
+                # [块] 列表页轻量筛选：owner/name 完整性 → Stars 预过滤 → 增量去重
                 for item in models:
                     if not isinstance(item, dict):
                         continue
@@ -136,15 +137,16 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                     name = self._extract_name(item)
                     if not owner or not name:
                         continue
+                    # [块] Stars 预过滤：低于阈值则在本地跳过，减少后续 README 请求
                     try:
                         stars = int(item.get("Stars") or 0)
                     except Exception:
                         stars = 0
                     if stars < self._min_stars:
-                        # Pre-filter by list page Stars to avoid extra HTTP
                         skipped += 1
                         continue
                     content_hash = f"models:{owner}/{name}"
+                    # [块] 增量去重：历史 existing_hashes ∪ 当页 seen_hashes
                     if content_hash in existing_set or content_hash in seen_hashes:
                         skipped += 1
                         continue
@@ -163,16 +165,19 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
                         break
                     continue
 
+                # [块] 页内并发：固定令牌，防止无限并发
                 sem = asyncio.Semaphore(page_concurrency)
 
                 async def run_task(owner: str, name: str, raw_item: Dict[str, object]) -> Optional[RawDocument]:
                     async with sem:
                         return await build(owner, name, raw_item)
 
+                # [块] 构建与收集：失败不抛出，逐个累积成功项
                 tasks = [asyncio.create_task(run_task(o, n, it)) for o, n, it in candidates]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 page_docs: List[RawDocument] = []
+                # [块] 聚合页结果：统计成功、更新 seen，达到目标条数时收束
                 for res, (_o, _n, _it) in zip(results, candidates):
                     if isinstance(res, Exception) or res is None:
                         continue
@@ -184,6 +189,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
 
                 self.logger.info("[models.fetch] page=%s succeeded=%s", page, len(page_docs))
                 if page_docs:
+                    # [块] 产出本页结果；外层 Runner 继续处理/入库
                     yield page_docs
                     if target_successes is not None and produced >= target_successes:
                         return
@@ -289,6 +295,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         - 否则：定位 README 文件（若存在），再取其内容并应用相同的占位检测。
         - 任何异常/占位开头/空串 → 返回 (None, None)，上层据此跳过该仓库。
         """
+        # [块] 优先从模型详情读取 ReadMeContent（更少请求、无需定位文件）
         try:
             detail = await client.fetch_model_detail(owner, name)
             if isinstance(detail, dict):
@@ -309,6 +316,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         except Exception:
             pass
 
+        # [块] 回退：列出仓库文件，定位 README，再取文件内容
         try:
             files = await client.fetch_model_files(owner, name)
         except Exception:
