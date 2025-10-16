@@ -10,7 +10,8 @@ from typing import AsyncGenerator, Dict, Iterable, List, Optional, Tuple
 import httpx
 import logging
 
-USER_AGENT = "UltraRAG-Community-Agent/0.1"
+from ingestion_pipeline.modelscope_headers import build_user_agent
+
 DEFAULT_ENDPOINT = "https://modelscope.cn"
 
 logger = logging.getLogger("ingestion.modelscope_client")
@@ -77,29 +78,21 @@ class ModelScopeClient:
         self.model_page_size = model_page_size
         self.dataset_page_size = dataset_page_size
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
 
-    async def __aenter__(self) -> "ModelScopeClient":
-        headers = {"User-Agent": USER_AGENT}
-        self._client = httpx.AsyncClient(timeout=self.timeout, headers=headers)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-        self._client = None
-
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        assert self._client is not None
         backoff = self.initial_backoff
         for attempt in range(self.max_retries):
             try:
                 headers = kwargs.pop("headers", {})
-                base_headers = dict(self._client.headers)
-                request_headers = {**base_headers, **headers, "X-Request-ID": uuid.uuid4().hex}
-                resp = await self._client.request(method, url, headers=request_headers, **kwargs)
+                request_headers = {
+                    "User-Agent": build_user_agent(),
+                    "X-Request-ID": uuid.uuid4().hex,
+                    **headers,
+                }
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.request(method, url, headers=request_headers, **kwargs)
                 if resp.status_code in {429, 500, 502, 503, 504}:
                     raise httpx.HTTPStatusError("server busy", request=resp.request, response=resp)
                 return resp

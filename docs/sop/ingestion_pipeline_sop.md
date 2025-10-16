@@ -447,7 +447,7 @@ metrics = asyncio.run(runner.run())
 - 去重：`content_hash = repo_id = datasets:{owner}/{name}`；用 `existing_hashes` 与本页 `seen` 去重。
 - README：`/api/v1/datasets/{owner}/{name}` 读取 `ReadmeContent`；为空/缺失则跳过。
 - 产出：按页一次性 `yield list[RawDocument]`；达成 `MODELSCOPE_DATASETS_TARGET`（若设置）即停止。
-- Header：请求统一带 `User-Agent: UltraRAG-Community-Agent/0.1` 与随机 `X-Request-ID`。
+- Header：请求统一复制当前环境实测 UA（例如 `modelscope/1.30.0; python/3.11.9; platform/macOS-13.7-arm64-arm-64bit; processor/arm; env/custom; user/unknown`），在发送前仅替换其中的 `session_id/<hex>` 为新的 32 位 UUID，同时附带随机 `X-Request-ID`。
 - 其它阶段（Clean → Split → Embed → Ingest）遵循通用规则：32_768 chunk 上限、UUIDv5 chunk_uuid、SQLite/Chroma 两阶段写入与最小 metadata 合同。
 
 配套脚本 `ingestion_pipeline/ingest_modelscope_datasets_readmes.py` 为生产入口，保留 `MODELSCOPE_DATASETS_TARGET` 作为可选限制参数，其余流程固定、不可切换。示例：

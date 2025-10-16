@@ -34,7 +34,7 @@ Author tests with `pytest`; place them in `tests/` mirroring the package path (`
 
 
 ## Retrieval Data Sources
-- README ingestion writes to the shared stores `output/ingestion/sqlite/docs.sqlite` (SQLite) and `output/ingestion/chroma` (Chroma collection `ingestion_docs`).
+- README ingestion writes to the shared stores `output/ingestion/sqlite/docs.sqlite` (SQLite) and `output/ingestion/chroma` (Chroma collection `modelscope_docs`).
 - Retriever pipelines必须使用 `retriever_init_readme` / `retriever_search_readme` 指向同一集合，只返回 `repo_author/repo_name/score`（可选 `clean_state`）。
 
 ## Search‑o1 Retrieval Neutrality & Anti‑Patterns
