@@ -720,6 +720,30 @@ class Retriever:
 
         ret_psg: List[List[str]] = []
         metadata_rows: List[List[Dict[str, Any]]] = []
+        def _owner_name_from_meta(meta: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+            """Best-effort extraction of (owner, name) from Chroma metadata.
+
+            SOP stores `owner_repo` only. Fall back to splitting `owner_repo`
+            or parsing `repo_id` (e.g., "models:owner/name").
+            """
+            owner = meta.get("owner")
+            name = meta.get("name")
+            if isinstance(owner, str) and owner.strip() and isinstance(name, str) and name.strip():
+                return owner.strip(), name.strip()
+
+            owner_repo = meta.get("owner_repo")
+            if isinstance(owner_repo, str) and "/" in owner_repo:
+                o, n = owner_repo.split("/", 1)
+                return o.strip() or None, n.strip() or None
+
+            repo_id = meta.get("repo_id")
+            if isinstance(repo_id, str) and ":" in repo_id:
+                _, tail = repo_id.split(":", 1)
+                if "/" in tail:
+                    o, n = tail.split("/", 1)
+                    return (o.strip() or None), (n.strip() or None)
+            return None, None
+
         for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
             cleaned_docs: List[str] = []
             row: List[Dict[str, Any]] = []
@@ -729,10 +753,11 @@ class Retriever:
                 cleaned_docs.append(cleaned_text)
 
                 meta = meta or {}
+                owner, name = _owner_name_from_meta(meta or {})
                 row.append(
                     {
-                        "repo_author": meta.get("owner"),
-                        "repo_name": meta.get("name"),
+                        "repo_author": owner,
+                        "repo_name": name,
                         "score": float(score) if score is not None else None,
                         "clean_state": clean_state,
                     }
