@@ -19,6 +19,7 @@ class SqliteChromaIngestor:
 
     def ingest(self, records: List[ChunkRecord], raw: RawDocument) -> None:
         if not records:
+            # [块] 空记录：仅更新 repo 表，维持 fetched_at 与内容哈希
             logger.info("[ingest] repo=%s no records, upserting repo metadata only", raw.repo_id)
             self.sqlite.begin()
             try:
@@ -35,6 +36,7 @@ class SqliteChromaIngestor:
             if getattr(r, "fetched_at", None) is None:
                 r.fetched_at = raw.fetched_at
 
+        # [块] 两阶段写入：先 SQLite（同事务替换），再 Chroma（删除→upsert），失败回滚
         self.sqlite.begin()
         try:
             self.sqlite.upsert_repo(raw)

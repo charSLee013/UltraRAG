@@ -80,8 +80,22 @@ class ModelScopeClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self) -> "ModelScopeClient":
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            finally:
+                self._client = None
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        # [块] 带退避请求：为每次请求重建 UA/X-Request-ID；对 429/5xx 做指数退避
         backoff = self.initial_backoff
         for attempt in range(self.max_retries):
             try:
@@ -91,8 +105,11 @@ class ModelScopeClient:
                     "X-Request-ID": uuid.uuid4().hex,
                     **headers,
                 }
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    resp = await client.request(method, url, headers=request_headers, **kwargs)
+                if self._client is None:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        resp = await client.request(method, url, headers=request_headers, **kwargs)
+                else:
+                    resp = await self._client.request(method, url, headers=request_headers, **kwargs)
                 if resp.status_code in {429, 500, 502, 503, 504}:
                     raise httpx.HTTPStatusError("server busy", request=resp.request, response=resp)
                 return resp
@@ -113,6 +130,7 @@ class ModelScopeClient:
         return data
 
     async def iter_models(self, limit: Optional[int] = None) -> AsyncGenerator[Dict[str, object], None]:
+        # [块] 按页迭代 models：首页得总数，逐页 yield，避免预扫描全集
         page = 1
         yielded = 0
         total = None
@@ -133,6 +151,7 @@ class ModelScopeClient:
                 break
 
     async def fetch_model_files(self, owner: str, name: str) -> List[ModelFile]:
+        # [块] 获取仓库文件列表，并标准化关键字段
         assert self._client is not None
         params = {"Recursive": "true"}
         resp = await self._request("GET", f"{self.endpoint}/api/v1/models/{owner}/{name}/repo/files", params=params)
@@ -164,6 +183,7 @@ class ModelScopeClient:
         return result
 
     async def fetch_model_file_content(self, file: ModelFile) -> Optional[Tuple[str, str]]:
+        # [块] 拉取 README 文件内容；返回 (text, url)
         assert self._client is not None
         params = {"FilePath": file.path}
         if file.revision:
@@ -174,6 +194,14 @@ class ModelScopeClient:
         resp.raise_for_status()
         resp.encoding = resp.encoding or "utf-8"
         return resp.text, str(resp.url)
+
+    async def fetch_model_detail(self, owner: str, name: str) -> Optional[Dict[str, object]]:
+        assert self._client is not None
+        resp = await self._request("GET", f"{self.endpoint}/api/v1/models/{owner}/{name}")
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        return payload.get("Data")
 
     async def _datasets_page(self, page_number: int) -> Dict[str, object]:
         assert self._client is not None

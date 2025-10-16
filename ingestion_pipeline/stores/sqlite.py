@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 from pathlib import Path
@@ -28,7 +27,7 @@ class SQLiteStore:
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA busy_timeout=3000")
-        # repo table to store per-document metadata for audit/replay
+        # repo 表：用于审计/重放的最小元数据
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS repo (
@@ -41,6 +40,7 @@ class SQLiteStore:
             )
             """
         )
+        # chunks 表：严格最小列集（不存 locator_* / embedding）
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (
@@ -48,15 +48,23 @@ class SQLiteStore:
                 repo_id TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                locator_type TEXT NOT NULL,
-                locator_owner_repo TEXT NOT NULL,
-                locator_url TEXT NOT NULL,
-                embedding TEXT NOT NULL
+                text TEXT NOT NULL
             )
             """
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_repo_content ON chunks(repo_id, content_hash)")
+        # 校验 schema：如存在多余/缺失列则 fail-fast（禁止自动迁移）
+        cur.execute("PRAGMA table_info(chunks)")
+        cols = [row[1] for row in cur.fetchall()]
+        minimal = ["chunk_uuid", "repo_id", "content_hash", "chunk_index", "text"]
+        if set(cols) != set(minimal):
+            cur.close()
+            raise RuntimeError(
+                "[sqlite] chunks schema mismatch; expected columns="
+                f"{minimal}, found={cols}. Please recreate the DB explicitly."
+            )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_repo_content ON chunks(repo_id, content_hash)"
+        )
         cur.close()
 
     def delete_repo_chunks(self, repo_id: str) -> None:
@@ -66,27 +74,22 @@ class SQLiteStore:
         )
 
     def _insert_records(self, records: Iterable[ChunkRecord]) -> None:
-        rows = []
-        for r in records:
-            rows.append(
-                (
-                    r.chunk_uuid,
-                    r.repo_id,
-                    r.content_hash,
-                    r.chunk_index,
-                    r.text,
-                    r.locator.source_type.value,
-                    r.locator.owner_repo,
-                    r.locator.source_url,
-                    json.dumps(r.embedding, ensure_ascii=False),
-                )
+        # 仅写入最小列集；locator/embedding 写入由 Chroma 负责
+        rows = [
+            (
+                r.chunk_uuid,
+                r.repo_id,
+                r.content_hash,
+                r.chunk_index,
+                r.text,
             )
+            for r in records
+        ]
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO chunks(
-                chunk_uuid, repo_id, content_hash, chunk_index, text,
-                locator_type, locator_owner_repo, locator_url, embedding
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chunk_uuid, repo_id, content_hash, chunk_index, text
+            ) VALUES (?, ?, ?, ?, ?)
             """,
             rows,
         )

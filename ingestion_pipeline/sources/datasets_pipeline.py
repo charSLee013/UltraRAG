@@ -67,6 +67,7 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
             target_successes = self.target_repo_count
 
         # Step 1: build dedupe sets (provided by Runner)
+        # [块] 去重集：运行期 existing_hashes（历史）+ seen_hashes（当页）
         existing_set: set[str] = set() if force else set(existing_hashes or set())
         seen_hashes: set[str] = set()
 
@@ -80,12 +81,14 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
             timeout=int(self.timeout),
         ) as client:
             # Compute total pages up front using the first page
+            # [块] 首页推导总页数（避免 O(N) 预扫描）
             first = await client._datasets_page(1)
             total_remote = int(first.get("TotalCount") or 0)
             max_pages = (total_remote + self.page_size - 1) // self.page_size if total_remote else 0
 
             timeouts = 0
 
+            # [块] 单仓构建：读取 README 文本 → 构建 RawDocument（失败返回 None）
             async def build(owner: str, name: str) -> Optional[RawDocument]:
                 # per-task jitter and timeout wrapping around README fetch helper
                 await asyncio.sleep(random.uniform(delay_min, delay_max))
@@ -125,6 +128,7 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
             for page in range(1, (max_pages or 1) + 1):
                 data = first if page == 1 else await client._datasets_page(page)
                 entries = data.get("Data") or []
+                # [块] 列表页轻筛：owner/name 完整性 → 增量去重
                 candidates: list[tuple[str, str, str]] = []  # (repo_id, owner, name)
                 total_entries = len(entries)
                 skipped = 0
@@ -161,6 +165,7 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                         break
                     continue
 
+                # [块] 页内并发：固定令牌，单页上限
                 sem = asyncio.Semaphore(page_concurrency)
                 timeouts = 0
 
@@ -172,6 +177,7 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                             return None
                         return doc
 
+                # [块] 并发收集：单个失败不影响整页聚合
                 tasks = [asyncio.create_task(run_task(o, n)) for _rid, o, n in candidates]
                 # Gather page results; we purposely do not raise on individual failures
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -197,6 +203,7 @@ class ModelScopeDatasetsPipeline(BaseIngestionPipeline):
                 )
 
                 if page_docs:
+                    # [块] 产出：按页 yield，Runner 负责后续 process/ingest
                     yield page_docs
                     # If we've reached the target success count, stop fetching further pages
                     if target_successes is not None and produced >= target_successes:

@@ -54,6 +54,7 @@ class IngestionRunner:
         self._ingest_batch_size = max(1, self.limits.ingest_batch_size)
 
     async def run(self) -> StageMetrics:
+        # [块] 三段并行：生产者（fetch）/工人（process+embed）/写入器（ingest）
         producer = asyncio.create_task(self._produce_docs())
         workers = [asyncio.create_task(self._worker(i)) for i in range(self.limits.max_workers)]
         writer = asyncio.create_task(self._writer())
@@ -90,6 +91,7 @@ class IngestionRunner:
             store.close()
 
     async def _produce_docs(self) -> None:
+        # [块] 构建去重集：按来源类型读取历史 content_hash（或强制全量）
         existing = set() if self.fetch_force else self._load_existing_hashes()
         bar = tqdm(total=None, desc="fetch", unit="page", leave=False)
         try:
@@ -125,6 +127,7 @@ class IngestionRunner:
                     chunk_max_size=self.limits.chunk_max_size,
                     embed=self._embed_with_limits,
                 )
+                # [块] 记录处理耗时与产量
                 _logger.info(
                     "[process] repo=%s records=%s elapsed=%.2fs",
                     raw.repo_id,
@@ -142,11 +145,13 @@ class IngestionRunner:
                 try:
                     result = await self._embed_func(drafts)
                 except Exception:
+                    # [块] AIMD：失败 → 收缩并发
                     self._embed_failure()
                     await asyncio.sleep(min(8, 2 ** attempt))
                     attempt += 1
                     continue
                 else:
+                    # [块] AIMD：成功 → 平滑增大并发
                     self._embed_success()
                     return result
 

@@ -36,6 +36,7 @@ def _env(name: str, fallback: Sequence[str] | None = None) -> str | None:
 async def embed_httpx(drafts: List[ChunkDraft]) -> List[EmbeddedChunk]:
     """Embed texts via an HTTP endpoint described in ingestion_pipeline_sop.md."""
 
+    # [块] 端点解析：env-first，多别名兼容；缺失直接失败
     base_url = _env(
         "EMBEDDING_API_URL",
         ("OPENAI_BASE_URL", "LLM_BASE_URL"),
@@ -67,6 +68,7 @@ async def embed_httpx(drafts: List[ChunkDraft]) -> List[EmbeddedChunk]:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    # [块] 请求载荷：仅发送必要字段，按需追加扩展项
     payload: dict[str, object] = {
         "model": model,
         "input": [d.text for d in drafts],
