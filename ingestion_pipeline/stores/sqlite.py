@@ -46,7 +46,6 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS chunks (
                 chunk_uuid TEXT PRIMARY KEY,
                 repo_id TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
                 text TEXT NOT NULL
             )
@@ -55,7 +54,7 @@ class SQLiteStore:
         # 校验 schema：如存在多余/缺失列则 fail-fast（禁止自动迁移）
         cur.execute("PRAGMA table_info(chunks)")
         cols = [row[1] for row in cur.fetchall()]
-        minimal = ["chunk_uuid", "repo_id", "content_hash", "chunk_index", "text"]
+        minimal = ["chunk_uuid", "repo_id", "chunk_index", "text"]
         if set(cols) != set(minimal):
             cur.close()
             raise RuntimeError(
@@ -63,7 +62,7 @@ class SQLiteStore:
                 f"{minimal}, found={cols}. Please recreate the DB explicitly."
             )
         cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chunks_repo_content ON chunks(repo_id, content_hash)"
+            "CREATE INDEX IF NOT EXISTS idx_chunks_repo ON chunks(repo_id, chunk_index)"
         )
         cur.close()
 
@@ -79,7 +78,6 @@ class SQLiteStore:
             (
                 r.chunk_uuid,
                 r.repo_id,
-                r.content_hash,
                 r.chunk_index,
                 r.text,
             )
@@ -88,8 +86,8 @@ class SQLiteStore:
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO chunks(
-                chunk_uuid, repo_id, content_hash, chunk_index, text
-            ) VALUES (?, ?, ?, ?, ?)
+                chunk_uuid, repo_id, chunk_index, text
+            ) VALUES (?, ?, ?, ?)
             """,
             rows,
         )

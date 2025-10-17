@@ -247,6 +247,45 @@ class ModelScopeClient:
         resp.raise_for_status()
         return strip_html(resp.text), url
 
+    async def _studios_page(
+        self,
+        page_number: int,
+        *,
+        page_size: int,
+        criterion: Optional[list[dict[str, object]]] = None,
+        sort_by: str = "Default",
+    ) -> Dict[str, object]:
+        assert self._client is not None
+        payload = {
+            "PageNumber": page_number,
+            "PageSize": page_size,
+            "SortBy": sort_by,
+            "Criterion": criterion or [],
+        }
+        resp = await self._request(
+            "PUT",
+            f"{self.endpoint}/api/v1/dolphin/studios",
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def fetch_studio_app(
+        self,
+        owner: str,
+        name: str,
+        *,
+        file_path: str = "app.py",
+        revision: str = "master",
+    ) -> Optional[str]:
+        assert self._client is not None
+        url = f"{self.endpoint}/studio/{owner}/{name}/resolve/{revision}/{file_path}"
+        resp = await self._request("GET", url)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.text
+
     @staticmethod
     def now_utc() -> str:
         return datetime.now(timezone.utc).isoformat()
