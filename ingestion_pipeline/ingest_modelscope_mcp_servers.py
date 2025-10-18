@@ -50,13 +50,7 @@ async def _run() -> None:
         except Exception:
             target_count = None
 
-    page_env = os.environ.get("MODELSCOPE_MCP_PAGE_SIZE")
-    try:
-        page_size = max(1, min(int(page_env), 100)) if page_env else 100
-    except Exception:
-        page_size = 100
-
-    pipeline = ModelScopeMCPPipeline(page_size=page_size, timeout=60.0, target_repo_count=target_count)
+    pipeline = ModelScopeMCPPipeline(page_size=20, timeout=60.0, target_repo_count=target_count)
     limits = PipelineRuntimeLimits(max_workers=8, max_embed_concurrency=8, ingest_batch_size=8, chunk_max_size=32768)
     runner = IngestionRunner(
         pipeline=pipeline,

@@ -11,6 +11,80 @@ import httpx
 import logging
 
 from ingestion_pipeline.modelscope_headers import build_user_agent
+from threading import Lock
+from typing import Any
+
+# Singleton cache for browser-like headers captured once via Playwright
+_MCP_HEADERS_CACHE: Dict[str, str] | None = None
+_MCP_HEADERS_LOCK = Lock()
+
+def _capture_mcp_headers_via_playwright() -> Dict[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception:
+        # Fallback to minimal headers if Playwright is unavailable
+        return {
+            "User-Agent": build_user_agent(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Content-Type": "application/json",
+        }
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        captured: Dict[str, str] | None = None
+
+        def on_request(req):
+            nonlocal captured
+            url = req.url
+            if req.method == "PUT" and ("/mcpServers" in url or "/mcp/servers" in url):
+                hdrs = dict(req.headers)
+                # Normalize keys and keep relevant ones
+                ua = hdrs.get("user-agent") or hdrs.get("User-Agent")
+                accept = hdrs.get("accept") or hdrs.get("Accept")
+                lang = (
+                    hdrs.get("x-modelscope-accept-language")
+                    or hdrs.get("accept-language")
+                    or hdrs.get("Accept-Language")
+                )
+                captured = {
+                    "User-Agent": ua or build_user_agent(),
+                    "Accept": accept or "application/json, text/plain, */*",
+                    "Accept-Language": lang or "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Content-Type": "application/json",
+                }
+
+        page.on("request", on_request)
+        try:
+            page.goto("https://modelscope.cn/mcp", wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
+        finally:
+            browser.close()
+
+    if captured is None:
+        # As a last resort return minimal headers
+        return {
+            "User-Agent": build_user_agent(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Content-Type": "application/json",
+        }
+    return captured
+
+def build_mcp_openapi_headers() -> Dict[str, str]:
+    """Return browser-like headers for MCP openapi, captured once per process.
+
+    Uses a singleton cache to avoid multiple browser launches.
+    """
+    global _MCP_HEADERS_CACHE
+    if _MCP_HEADERS_CACHE is not None:
+        return dict(_MCP_HEADERS_CACHE)
+    with _MCP_HEADERS_LOCK:
+        if _MCP_HEADERS_CACHE is None:
+            _MCP_HEADERS_CACHE = _capture_mcp_headers_via_playwright()
+    return dict(_MCP_HEADERS_CACHE)
 
 DEFAULT_ENDPOINT = "https://modelscope.cn"
 

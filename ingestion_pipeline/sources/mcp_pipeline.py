@@ -50,11 +50,11 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
     def __init__(
         self,
         *,
-        page_size: int = 100,
+        page_size: int = 20,
         timeout: float | None = 60.0,
         target_repo_count: Optional[int] = None,
     ) -> None:
-        self.page_size = max(1, min(int(page_size or 100), 100))
+        self.page_size = max(1, min(int(page_size or 20), 100))
         self.timeout = float(timeout or 60.0)
         self.jitter_range = (0.2, 1.5)
         self.target_repo_count = int(target_repo_count) if target_repo_count else None
@@ -86,19 +86,22 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
                     "page_size": self.page_size,
                     "search": "",
                 }
-                # Per-request rotating headers per SOP (UA + X-Request-ID)
+                # Use singleton browser-like headers captured once
                 attempt = 0
                 max_retries = 4
                 last_exc: Optional[Exception] = None
                 payload: Optional[Dict[str, object]] = None
                 while True:
-                    headers = {
-                        "User-Agent": build_user_agent(),
-                        "X-Request-ID": uuid.uuid4().hex,
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    }
+                    try:
+                        from ..modelscope_client import build_mcp_openapi_headers
+                        headers = build_mcp_openapi_headers()
+                    except Exception:
+                        headers = {
+                            "User-Agent": build_user_agent(),
+                            "Accept": "application/json, text/plain, */*",
+                            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                            "Content-Type": "application/json",
+                        }
                     try:
                         resp = await client.put(url, headers=headers, json=body)
                         # retry on 403/429/5xx
