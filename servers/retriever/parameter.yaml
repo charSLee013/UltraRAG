@@ -5,6 +5,12 @@ corpus_path: data/corpus_example.jsonl
 is_multimodal: false
 embedding_path: embedding/embedding.npy
 index_path: index/index.index
+chroma_path: null
+chroma_collection: modelscope_docs
+embedding_api_url: null
+embedding_api_key: null
+embedding_model: BAAI/bge-m3
+embedding_timeout: 60
 
 # infinify_emb config
 infinity_kwargs:

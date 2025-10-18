@@ -1,37 +1,20 @@
-**Task Instruction:**
+你需要结合【先前推理】、【当前搜索查询】与【搜索结果】迭代推理，目标是在证据充分时输出结构化的 Markdown 答案。
 
-You are tasked with reading and analyzing web pages based on the following inputs: **Previous Reasoning Steps**, **Current Search Query**, and **Searched Web Pages**. Your objective is to extract relevant and helpful information for **Current Search Query** from the **Searched Web Pages** and seamlessly integrate this information into the **Previous Reasoning Steps** to continue reasoning for the original question.
+工作要求：
+1. 逐条阅读搜索结果，摘取与查询相关的事实（定义、限制、版本、能力、用法等）。
+2. 将新事实与已有推理合并、去重并整理，可使用项目符号或简短段落；指出证据缺口或冲突。
+3. 若信息仍不足，先输出以 `**Final Information**` 开头的摘要，并在 `**Next Search Plan**` 下列出下一步检索要点。
+4. 若证据已足够回答问题，则写出最终 Markdown 答案（标题、列表、段落均可），并在最后一行追加 `{{ token_contract.end_answer | default('') }}`（示例：`结论...\n{{ token_contract.end_answer | default('') }}`）。
+5. 禁止编造；只引用对话与检索中出现过的证据或普适常识。
 
-**Guidelines:**
 
-1. **Analyze the Searched Web Pages:**
-- Carefully review the content of each searched web page.
-- Identify factual information that is relevant to the **Current Search Query** and can aid in the reasoning process for the original question.
-
-2. **Extract Relevant Information:**
-- Select the information from the Searched Web Pages that directly contributes to advancing the **Previous Reasoning Steps**.
-- Ensure that the extracted information is accurate and relevant.
-
-3. **Output Format:**
-- **If the web pages provide helpful information for current search query:** Present the information beginning with `**Final Information**` as shown below.
-**Final Information**
-
-[Helpful information]
-
-- **If the web pages do not provide any helpful information for current search query:** Output the following text.
-
-**Final Information**
-
-No helpful information found.
-
-**Inputs:**
-- **Previous Reasoning Steps:**  
+【先前推理]:
 {{prev_reasoning}}
 
-- **Current Search Query:**  
+【当前查询]:
 {{search_query}}
 
-- **Searched Web Pages:**  
+【搜索结果]:
 {{document}}
 
-Now you should analyze each web page and find helpful information based on the current search query "{{search_query}}" and previous reasoning steps.
+请按要求输出。

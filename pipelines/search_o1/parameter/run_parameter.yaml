@@ -1,0 +1,53 @@
+# 参数文件。给 run.yaml 中以 $ 引用的占位符提供值，作用域按所处 server 名字隔离（如 prompt/token_contract、retriever/top_k、generation/model_name 等）。值的解析遵循 env-first（环境变量优先，其次这里，没有就崩）。
+
+prompt:
+  goal_description: "回答开发者问题并引用检索证据"
+  init_template: prompt/search_o1_reasoning.jinja
+  reasoning_template: prompt/search_o1_refinement.jinja
+  finalize_template: prompt/search_o1_finalize.jinja
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+    begin_result: "<<SRCH_R_BEGIN>>"
+    end_result: "<<SRCH_R_END>>"
+
+router:
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+
+custom:
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+    begin_result: "<<SRCH_R_BEGIN>>"
+    end_result: "<<SRCH_R_END>>"
+
+generation:
+  model_name: ""
+  base_url: ""
+  api_key: ""
+  sampling_params:
+    timeout: 600
+    max_tokens: 2048
+    temperature: 0.2
+    top_p: 0.8
+    extra_body:
+      include_stop_str_in_output: true
+      stop: []
+
+retriever:
+  chroma_path: null
+  chroma_collection: modelscope_docs
+  embedding_api_url: null
+  embedding_api_key: null
+  embedding_model: BAAI/bge-m3
+  embedding_timeout: 60
+  top_k: 10
+  query_instruction: "Query: "
+
+loop:
+  times: 2

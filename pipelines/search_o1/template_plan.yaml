@@ -1,0 +1,4 @@
+goal_description: "回答开发者问题并引用检索证据"
+init: prompt/search_o1_reasoning.jinja
+reasoning_indoc: prompt/search_o1_refinement.jinja
+finalize: prompt/search_o1_finalize.jinja

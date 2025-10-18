@@ -78,6 +78,7 @@ class UltraData:
         self,
         pipeline_yaml_path: str,
         server_configs: Dict[str, Dict] = None,
+        seed_vars: Dict[str, Any] | None = None,
         parameter_file: str | Path | None = None,
     ):
         self.pipeline_yaml_path = pipeline_yaml_path
@@ -107,6 +108,15 @@ class UltraData:
         self.local_vals.update(all_local_vals)
         self.io = {}
         self.global_vars = {}
+        # Pre-seed global variables so the IO extractor can validate references
+        if seed_vars:
+            for k, v in seed_vars.items():
+                self.global_vars[k] = copy.deepcopy(v)
+                mem_key = self._canonical_mem(
+                    k if k.startswith(("mem_", "memory_")) else f"memory_{k}"
+                )
+                self.global_vars.setdefault(mem_key, [])
+                self.global_vars[mem_key].append(copy.deepcopy(v))
         self._extract_io(pipeline.get("pipeline", []))
         # store history of memory states after each step
         self.snapshots: List[Dict[str, Any]] = []
@@ -331,12 +341,24 @@ class UltraData:
                 if v.startswith("$"):
                     v = v[1:]
 
-                    if v in self.local_vals[server_name]:
-                        args_input[k] = self.local_vals[server_name][v]
-                    else:
+                    server_params = self.local_vals.get(server_name, {})
+
+                    def _resolve(param_map: Dict[str, Any], path: str) -> Any:
+                        parts = path.split(".")
+                        current: Any = param_map
+                        for part in parts:
+                            if isinstance(current, dict) and part in current:
+                                current = current[part]
+                            else:
+                                raise KeyError(part)
+                        return current
+
+                    try:
+                        args_input[k] = _resolve(server_params, v)
+                    except KeyError:
                         raise ValueError(
                             f"Variable {v} not found for step {server_name}.{tool_name}"
-                        )
+                        ) from None
 
                 else:
                     v = self._canonical_mem(v)
@@ -813,7 +835,20 @@ async def build(config_path: str):
     logger.info(f"All server configurations have been saved in {server_save_path}")
 
 
-async def run(config_path: str, param_path: str | Path | None = None):
+async def run(
+    config_path: str,
+    seed_vars: Dict[str, Any] | None = None,
+    param_path: str | Path | None = None
+):
+    global logger, log_level
+    if logger is None:
+        default_level = (
+            os.environ.get("log_level")
+            or os.environ.get("ULTRARAG_LOG_LEVEL")
+            or "info"
+        )
+        log_level = default_level
+        logger = get_logger("Client", log_level)
     cfg_path = Path(config_path)
     log_server_banner(cfg_path.stem)
     logger.info(f"Executing pipeline with configuration {config_path}")
@@ -856,11 +891,13 @@ async def run(config_path: str, param_path: str | Path | None = None):
         server_cfg[srv_name]["parameter"] = param_cfg.get(srv_name, {})
 
     mcp_cfg = {"mcpServers": {}}
+    import sys as _sys
+    py_exec = _sys.executable or "python"
     for name, sc in server_cfg.items():
         path = sc.get("path", "")
         if path.endswith(".py"):
             mcp_cfg["mcpServers"][name] = {
-                "command": "python",
+                "command": py_exec,
                 "args": [path],
                 "env": os.environ.copy(),
             }
@@ -1033,8 +1070,12 @@ async def run(config_path: str, param_path: str | Path | None = None):
         logger.info(f"Available tools: {tool_name_lst}")
         result = await execute_steps(pipeline_cfg)
         logger.info(f"Pipeline execution completed.")
-        # save memory snapshots
-        Data.write_memory_output(cfg_name, datetime.now().strftime("%Y%m%d_%H%M%S"))
+        # save memory snapshots when debug flag is enabled
+        debug_enabled = os.getenv("SEARCH_O1_DEBUG")
+        if debug_enabled and debug_enabled not in ("0", "false", "False"):
+            Data.write_memory_output(
+                cfg_name, datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
         return result.data
 
 

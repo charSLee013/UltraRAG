@@ -93,8 +93,8 @@ def initialize_local_vllm(
 @app.tool(output="prompt_ls,model_name,base_url,sampling_params,api_key->ans_ls")
 async def generate(
     prompt_ls: List[Union[str, Dict[str, Any]]],
-    model_name: str,
-    base_url: str,
+    model_name: str | None,
+    base_url: str | None,
     sampling_params: Dict[str, Any],
     api_key: str = "EMPTY",
 ) -> Dict[str, List[str]]:
@@ -105,7 +105,54 @@ async def generate(
         else os.environ.get("LLM_API_KEY", "EMPTY")
     )
 
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    sampling_params = dict(sampling_params)
+    request_timeout = sampling_params.pop("timeout", None)
+
+    # Env-first precedence: prefer environment variables over parameters
+    resolved_base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("BASE_URL")
+        or base_url
+    )
+    if not resolved_base_url:
+        raise ToolError(
+            "LLM base URL not provided; set via env (LLM_BASE_URL/OPENAI_BASE_URL/BASE_URL) or parameter"
+        )
+
+    resolved_model = (
+        os.environ.get("LLM_MODEL_NAME")
+        or os.environ.get("MODEL_NAME")
+        or os.environ.get("LLM_MODEL")
+        or model_name
+    )
+    if not resolved_model:
+        raise ToolError(
+            "LLM model name not provided; set via env (LLM_MODEL_NAME/MODEL_NAME/LLM_MODEL) or parameter"
+        )
+
+    app.logger.info(
+        f"[generation] Using base_url=***; model_name={resolved_model} (env-first)."
+    )
+
+    client = AsyncOpenAI(
+        base_url=resolved_base_url,
+        api_key=api_key,
+        timeout=request_timeout,
+    )
+
+    def _debug_enabled() -> bool:
+        v = os.getenv("SEARCH_O1_DEBUG")
+        return v not in (None, "0", "false", "False")
+
+    _timeout_notified = getattr(app, "_timeout_notified", False)
+    if request_timeout and not _timeout_notified:
+        level = app.logger.info if not _debug_enabled() else app.logger.debug  # type: ignore[attr-defined]
+        level(
+            "[generation] timeout configured to %s seconds.",
+            request_timeout,
+        )
+        setattr(app, "_timeout_notified", True)
 
     prompts = []
     for m in prompt_ls:
@@ -120,17 +167,50 @@ async def generate(
 
     sem = asyncio.Semaphore(8)
 
+    if _debug_enabled():
+        stop_list = (
+            (sampling_params.get("extra_body") or {}).get("stop")
+            if isinstance(sampling_params.get("extra_body"), dict)
+            else None
+        )
+        app.logger.info(
+            "[generation] debug: model=%s base_url=*** stop=%s max_tokens=%s",
+            resolved_model,
+            stop_list,
+            sampling_params.get("max_tokens"),
+        )
+
     async def call_with_retry(idx: int, prompt: str, retries=3, delay=1):
         msg = [{"role": "user", "content": prompt}]
         async with sem:
             for attempt in range(retries):
                 try:
                     resp = await client.chat.completions.create(
-                        model=model_name,
+                        model=resolved_model,
                         messages=msg,
                         **sampling_params,
                     )
-                    return idx, resp.choices[0].message.content
+                    content = resp.choices[0].message.content
+                    if _debug_enabled():
+                        try:
+                            app.logger.info("[generation] debug: raw=%s", resp.model_dump_json())
+                        except Exception:
+                            app.logger.info("[generation] debug: raw=%s", resp)
+                    if _debug_enabled():
+                        finish = getattr(resp.choices[0], "finish_reason", None)
+                        usage = getattr(resp, "usage", None)
+                        try:
+                            usage_dump = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                        except Exception:
+                            usage_dump = str(usage)
+                        app.logger.info(
+                            "[generation] debug: idx=%s finish=%s len=%s usage=%s",
+                            idx,
+                            finish,
+                            len(content or ""),
+                            usage_dump,
+                        )
+                    return idx, content
                 except AuthenticationError as e:
                     raise ToolError(
                         f"Unauthorized (401): Access denied at {base_url}."
@@ -158,8 +238,8 @@ async def generate(
 )
 async def multimodal_generate(
     prompt_ls: List[Union[str, Dict[str, Any]]],
-    model_name: str,
-    base_url: str,
+    model_name: str | None,
+    base_url: str | None,
     sampling_params: Dict[str, Any],
     ret_path: List[List[str]],
     api_key: str = "EMPTY",
@@ -171,7 +251,38 @@ async def multimodal_generate(
         else os.environ.get("LLM_API_KEY", "EMPTY")
     )
 
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    # Env-first precedence: prefer environment variables over parameters
+    resolved_base_url = (
+        os.environ.get("LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("BASE_URL")
+        or base_url
+    )
+    if not resolved_base_url:
+        raise ToolError(
+            "LLM base URL not provided; set via env (LLM_BASE_URL/OPENAI_BASE_URL/BASE_URL) or parameter"
+        )
+
+    resolved_model = (
+        os.environ.get("LLM_MODEL_NAME")
+        or os.environ.get("MODEL_NAME")
+        or os.environ.get("LLM_MODEL")
+        or model_name
+    )
+    if not resolved_model:
+        raise ToolError(
+            "LLM model name not provided; set via env (LLM_MODEL_NAME/MODEL_NAME/LLM_MODEL) or parameter"
+        )
+
+    app.logger.info(
+        f"[generation] Using base_url=***; model_name={resolved_model} (env-first)."
+    )
+
+    client = AsyncOpenAI(base_url=resolved_base_url, api_key=api_key)
+
+    def _debug_enabled() -> bool:
+        v = os.getenv("SEARCH_O1_DEBUG")
+        return v not in (None, "0", "false", "False")
 
     prompts = []
     for m in prompt_ls:
@@ -220,11 +331,31 @@ async def multimodal_generate(
             for attempt in range(retries):
                 try:
                     resp = await client.chat.completions.create(
-                        model=model_name,
+                        model=resolved_model,
                         messages=msg,
                         **sampling_params,
                     )
-                    return idx, resp.choices[0].message.content
+                    text = resp.choices[0].message.content
+                    if _debug_enabled():
+                        try:
+                            app.logger.info("[generation] debug: raw=%s", resp.model_dump_json())
+                        except Exception:
+                            app.logger.info("[generation] debug: raw=%s", resp)
+                    if _debug_enabled():
+                        finish = getattr(resp.choices[0], "finish_reason", None)
+                        usage = getattr(resp, "usage", None)
+                        try:
+                            usage_dump = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                        except Exception:
+                            usage_dump = str(usage)
+                        app.logger.info(
+                            "[generation] debug: idx=%s finish=%s len=%s usage=%s",
+                            idx,
+                            finish,
+                            len(text or ""),
+                            usage_dump,
+                        )
+                    return idx, text
                 except AuthenticationError as e:
                     raise ToolError(
                         f"Unauthorized (401): Access denied at {base_url}."

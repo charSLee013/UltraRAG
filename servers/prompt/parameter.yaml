@@ -21,3 +21,8 @@ webnote_init_page_template: prompt/webnote_init_page.jinja
 webnote_gen_subq_template: prompt/webnote_gen_subq.jinja
 webnote_fill_page_template: prompt/webnote_fill_page.jinja
 webnote_gen_answer_template: prompt/webnote_gen_answer.jinja
+
+# Search‑o1 dedicated templates (env-first pipelines will override callsite)
+search_o1_init_template: prompt/search_o1_reasoning.jinja
+search_o1_refinement_template: prompt/search_o1_refinement.jinja
+search_o1_finalize_template: prompt/search_o1_finalize.jinja

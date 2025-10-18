@@ -1,0 +1,11 @@
+# Retriever search smoke test (end-to-end)
+
+servers:
+  benchmark: servers/benchmark
+  retriever: servers/retriever
+
+pipeline:
+- benchmark.get_data
+- retriever.retriever_init_readme
+- retriever.retriever_search_readme
+

@@ -1,0 +1,84 @@
+# run.yaml：编排文件。定义 servers 清单与整条流水线（顺序/loop/branch/每步的 input/output 占位符）
+# 只描述“做什么、按什么顺序做”。
+
+servers:
+  generation: servers/generation
+  retriever: servers/retriever
+  prompt: servers/prompt
+  router: servers/router
+  custom: servers/custom
+
+pipeline:
+- retriever.retriever_init_readme:
+    input:
+      chroma_path: $chroma_path
+      chroma_collection: $chroma_collection
+      embedding_api_url: $embedding_api_url
+      embedding_api_key: $embedding_api_key
+      embedding_model: $embedding_model
+      embedding_timeout: $embedding_timeout
+- prompt.search_o1_init:
+    input:
+      q_ls: q_ls
+      template: $init_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+- loop:
+    times: 2
+    steps:
+    - branch:
+        router:
+        - router.search_o1_check:
+            input:
+              token_contract: $token_contract
+        branches:
+          retrieve:
+          - custom.search_o1_query_extract:
+              input:
+                token_contract: $token_contract
+          - retriever.retriever_search_readme:
+              input:
+                query_list: extract_query_list
+                query_instruction: $query_instruction
+                top_k: $top_k
+          - prompt.searcho1_reasoning_indocument:
+              input:
+                template: $reasoning_template
+                goal_description: $goal_description
+                token_contract: $token_contract
+          - generation.generate:
+              input:
+                model_name: $model_name
+                base_url: $base_url
+                sampling_params: $sampling_params
+                api_key: $api_key
+          - prompt.search_o1_insert:
+              input:
+                token_contract: $token_contract
+          - generation.generate:
+              input:
+                model_name: $model_name
+                base_url: $base_url
+                sampling_params: $sampling_params
+                api_key: $api_key
+          stop: []
+- prompt.search_o1_finalize:
+    input:
+      template: $finalize_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+- custom.output_passthrough:
+    input:
+      token_contract: $token_contract

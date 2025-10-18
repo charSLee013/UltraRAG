@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from ultrarag.server import UltraRAG_MCP_Server
 
@@ -105,23 +105,43 @@ def r1_searcher_check(ans_ls: List[str]) -> Dict[str, List[Dict[str, str]]]:
     return {"ans_ls": ans_ls}
 
 
-@app.tool(output="ans_ls->ans_ls")
-def search_o1_check(ans_ls: List[str]) -> Dict[str, List[Dict[str, str]]]:
-    def get_eos(text):
+def _contract_token(contract: Dict[str, Any], key: str) -> str:
+    value = contract.get(key) if contract else None
+    if isinstance(value, str) and value:
+        return value
+    return ""
 
-        if "<|im_end|>" in text:
-            return True
-        elif "<|end_search_query|>" in text:
-            return False
 
-    ans_ls = [
+@app.tool(output="ans_ls,token_contract->ans_ls")
+def search_o1_check(
+    ans_ls: List[str],
+    token_contract: Dict[str, Any],
+) -> Dict[str, List[Dict[str, str]]]:
+    end_answer = _contract_token(token_contract, "end_answer")
+    end_query = _contract_token(token_contract, "end_query")
+
+    def route_state(text: str) -> str:
+        if end_answer and end_answer in text:
+            return "stop"
+        if end_query and end_query in text:
+            return "retrieve"
+        return "retrieve"
+
+    routed = [
         {
             "data": answer,
-            "state": "stop" if get_eos(answer) else "retrieve",
+            "state": route_state(answer),
         }
         for answer in ans_ls
     ]
-    return {"ans_ls": ans_ls}
+    states = [entry["state"] for entry in routed]
+    app.logger.info(
+        "[search_o1_check] contract_end_answer=%s, end_query=%s, states=%s",
+        end_answer,
+        end_query,
+        states,
+    )
+    return {"ans_ls": routed}
 
 
 if __name__ == "__main__":

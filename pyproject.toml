@@ -25,6 +25,7 @@ dependencies = [
     "flask[async]",
     "exa_py",
     "tavily-python",
+    "chromadb",
 ]
 
 [project.optional-dependencies]

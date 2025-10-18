@@ -1,0 +1,11 @@
+你已经完成多轮搜索与整合，请基于当前对话/上下文输出最终答复。
+
+生成规则：
+1. 输出标准 Markdown 文本，可使用标题、编号、项目符号或段落来组织答案。
+2. 答案必须只依赖对话与检索证据；严禁编造未出现的事实。
+3. 在最终答案的最后一行追加 `{{ token_contract.end_answer | default('') }}`，用于通知系统结束（示例：`...\n{{ token_contract.end_answer | default('') }}`）。
+
+以下是你当前掌握的推理上下文：
+{{conversation}}
+
+请直接输出 Markdown 答案，并在末尾追加 `{{ token_contract.end_answer | default('') }}`。

@@ -1,5 +1,6 @@
+import os
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ultrarag.server import UltraRAG_MCP_Server
 
@@ -21,7 +22,7 @@ def search_r1_query_extract(ans_ls: List[str]) -> Dict[str, List[str]]:
                 query += "?"
             return query
         else:
-            return "There is no query."
+            return ""
 
     query = [get_query(answer) for answer in ans_ls]
 
@@ -62,36 +63,6 @@ def iterretgen_nextquery(
     return {"nextq_ls": ret}
 
 
-@app.tool(output="ans_ls->pred_ls")
-def output_extract_from_boxed(ans_ls: List[str]) -> Dict[str, List[str]]:
-    def extract(ans: str) -> str:
-        start = ans.rfind(r"\boxed{")
-        if start == -1:
-            content = ans.strip()
-        else:
-            i = start + len(r"\boxed{")
-            brace_level = 1
-            end = i
-            while end < len(ans) and brace_level > 0:
-                if ans[end] == "{":
-                    brace_level += 1
-                elif ans[end] == "}":
-                    brace_level -= 1
-                end += 1
-            content = ans[i : end - 1].strip()
-            content = re.sub(r"^\$+|\$+$", "", content).strip()
-            content = re.sub(r"^\\\(|\\\)$", "", content).strip()
-            if content.startswith(r"\text{") and content.endswith("}"):
-                content = content[len(r"\text{") : -1].strip()
-            content = content.strip("()").strip()
-
-        content = content.replace("\\", " ")
-        content = content.replace("  ", " ")
-        return content
-
-    return {"pred_ls": [extract(ans) for ans in ans_ls]}
-
-
 @app.tool(output="ans_ls->q_ls")
 def ircot_get_first_sent(
     ans_ls: List[str],
@@ -119,30 +90,83 @@ def ircot_extract_ans(ans_ls: List[str]) -> Dict[str, List[str]]:
     return {"pred_ls": ret}
 
 
-@app.tool(output="ans_ls->extract_query_list")
-def search_o1_query_extract(ans_ls: List[str]) -> Dict[str, List[str]]:
+def _contract_token(
+    contract: Optional[Dict[str, Any]],
+    key: str,
+    default: Optional[str],
+) -> Optional[str]:
+    if not contract:
+        return default
+    value = contract.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return default
 
-    def get_query(text):
-        import re
 
-        pattern = (
-            re.escape("<|begin_search_query|>")
-            + r"(.*?)"
-            + re.escape("<|end_search_query|>")
+@app.tool(output="ans_ls,token_contract->extract_query_list")
+def search_o1_query_extract(
+    ans_ls: List[str],
+    token_contract: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    begin_query = _contract_token(
+        token_contract, "begin_query", None
+    )
+    end_query = _contract_token(token_contract, "end_query", None)
+
+    pattern: Optional[re.Pattern[str]] = None
+    if begin_query and end_query:
+        pattern = re.compile(
+            re.escape(begin_query) + r"(.*?)" + re.escape(end_query), re.DOTALL
         )
-        matches = re.findall(pattern, text, flags=re.DOTALL)
 
+    queries: List[str] = []
+    for answer in ans_ls:
+        if not pattern:
+            queries.append("")
+            continue
+        matches = pattern.findall(answer)
         if matches:
-            query = matches[-1].strip()
-            if not query.endswith("?"):
-                query += "?"
-            return query
+            queries.append(matches[-1].strip())
         else:
-            return "There is no query."
+            queries.append("")
 
-    query = [get_query(answer) for answer in ans_ls]
+    debug_flag = os.getenv("SEARCH_O1_DEBUG")
+    if debug_flag and debug_flag not in {"0", "false", "False"}:
+        last_query = next((q for q in reversed(queries) if q), "")
+        if last_query:
+            app.logger.debug(
+                "[search_o1_query_extract] latest_query=%s",
+                last_query[:200],
+            )
 
-    return {"extract_query_list": query}
+    return {"extract_query_list": queries}
+
+
+@app.tool(output="ans_ls,token_contract->markdown_ls")
+def output_passthrough(
+    ans_ls: List[str],
+    token_contract: Dict[str, Any],
+) -> Dict[str, List[str]]:
+    tokens = {
+        token
+        for token in (
+            _contract_token(token_contract, "end_answer", None),
+            _contract_token(token_contract, "begin_query", None),
+            _contract_token(token_contract, "end_query", None),
+            _contract_token(token_contract, "begin_result", None),
+            _contract_token(token_contract, "end_result", None),
+        )
+        if token
+    }
+
+    cleaned: List[str] = []
+    for ans in ans_ls:
+        text = ans
+        for token in tokens:
+            text = text.replace(token, "")
+        cleaned.append(text.strip())
+
+    return {"markdown_ls": cleaned}
 
 
 if __name__ == "__main__":

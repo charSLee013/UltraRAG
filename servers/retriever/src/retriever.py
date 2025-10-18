@@ -11,10 +11,12 @@ import pandas as pd
 from tqdm import tqdm
 from flask import Flask, jsonify, request
 from openai import AsyncOpenAI, OpenAIError
+import httpx
 
 
 from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
 from ultrarag.server import UltraRAG_MCP_Server
+from ultrarag.utils import normalize_readme_text
 from pathlib import Path
 
 app = UltraRAG_MCP_Server("retriever")
@@ -78,6 +80,24 @@ class Retriever:
         mcp_inst.tool(
             self.retriever_zhipuai_search,
             output="q_ls,top_k,retrieve_thread_num->ret_psg",
+        )
+        mcp_inst.tool(
+            self.retriever_init_readme,
+            output="chroma_path,chroma_collection,embedding_api_url,embedding_api_key,embedding_model,embedding_timeout->None",
+        )
+        mcp_inst.tool(
+            self.retriever_search_readme,
+            output="q_ls,top_k,query_instruction->ret_psg,metadata",
+        )
+        mcp_inst.tool(
+            self.retriever_init_readme,
+            name="retriever_init_chroma",
+            output="chroma_path,chroma_collection,embedding_api_url,embedding_api_key,embedding_model,embedding_timeout->None",
+        )
+        mcp_inst.tool(
+            self.retriever_search_readme,
+            name="retriever_search_chroma",
+            output="q_ls,top_k,query_instruction->ret_psg,metadata",
         )
 
     def retriever_init(
@@ -579,6 +599,173 @@ class Retriever:
             results.append(top_contents)
 
         return {"ret_psg": results}
+
+    def retriever_init_readme(
+        self,
+        chroma_path: Optional[str] = None,
+        chroma_collection: str = "modelscope_docs",
+        embedding_api_url: Optional[str] = None,
+        embedding_api_key: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_timeout: Optional[int | str] = None,
+    ):
+        from chromadb import PersistentClient
+
+        chroma_path = chroma_path or os.environ.get("CHROMA_PATH")
+        if not chroma_path:
+            raise ValueError("chroma_path must be provided via parameter or CHROMA_PATH")
+        chroma_path = os.path.expanduser(chroma_path)
+        if not os.path.isdir(chroma_path):
+            raise FileNotFoundError(f"Chroma path does not exist: {chroma_path}")
+
+        collection_name = chroma_collection or os.environ.get("CHROMA_COLLECTION")
+        if not collection_name:
+            raise ValueError("chroma_collection must be specified")
+
+        url = embedding_api_url or os.environ.get("EMBEDDING_API_URL")
+        if not url:
+            raise ValueError("EMBEDDING_API_URL must be set for SiliconFlow embeddings")
+
+        key = embedding_api_key or os.environ.get("EMBEDDING_API_KEY")
+        if not key:
+            raise ValueError("EMBEDDING_API_KEY must be set for SiliconFlow embeddings")
+
+        model = (
+            embedding_model
+            or os.environ.get("EMBEDDING_MODEL")
+            or "BAAI/bge-m3"
+        )
+
+        timeout_candidate = embedding_timeout or os.environ.get("EMBEDDING_TIMEOUT") or 60
+        try:
+            timeout = int(timeout_candidate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("embedding_timeout must be an integer value") from exc
+
+        self.chroma_client = PersistentClient(path=chroma_path)
+        self.chroma_collection = self.chroma_client.get_collection(collection_name)
+        self.chroma_collection_name = collection_name
+        self.embedding_api_url = url
+        self.embedding_api_key = key
+        self.embedding_model = model
+        self.embedding_timeout = timeout
+
+    async def _embed_remote(self, texts: List[str]) -> List[List[float]]:
+        if not hasattr(self, "embedding_api_url"):
+            raise RuntimeError("README retriever is not initialized; call retriever_init_readme first")
+        if not texts:
+            return []
+
+        payload = {
+            "model": self.embedding_model,
+            "input": texts,
+            "encoding_format": "float",
+        }
+        headers = {"Authorization": f"Bearer {self.embedding_api_key}"}
+
+        backoff = 30.0
+        for attempt in range(5):
+            try:
+                async with httpx.AsyncClient(timeout=self.embedding_timeout) as client:
+                    resp = await client.post(self.embedding_api_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                embeddings = [item["embedding"] for item in data["data"]]
+                if len(embeddings) != len(texts):
+                    raise RuntimeError("Embedding service returned mismatched result count")
+                return embeddings
+            except Exception:
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(backoff)
+
+        raise RuntimeError("Failed to obtain embeddings from SiliconFlow")
+
+    async def retriever_search_readme(
+        self,
+        query_list: List[str],
+        top_k: int = 5,
+        query_instruction: str = "",
+    ) -> Dict[str, Any]:
+        if not hasattr(self, "chroma_collection"):
+            raise RuntimeError("README retriever is not initialized; call retriever_init_readme first")
+
+        if isinstance(query_list, str):
+            query_list = [query_list]
+        if top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
+
+        filtered_queries = [
+            query.strip()
+            for query in query_list
+            if isinstance(query, str) and query.strip()
+        ]
+
+        if not filtered_queries:
+            empty = [[] for _ in query_list]
+            return {"ret_psg": empty, "metadata": empty}
+
+        queries = [f"{query_instruction}{query}" for query in filtered_queries]
+        embeddings = await self._embed_remote(queries)
+
+        results = self.chroma_collection.query(
+            query_embeddings=embeddings,
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        documents = results.get("documents") or [[] for _ in filtered_queries]
+        metadatas = results.get("metadatas") or [[] for _ in filtered_queries]
+        distances = results.get("distances") or [[] for _ in filtered_queries]
+
+        ret_psg: List[List[str]] = []
+        metadata_rows: List[List[Dict[str, Any]]] = []
+        def _owner_name_from_meta(meta: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+            """Best-effort extraction of (owner, name) from Chroma metadata.
+
+            SOP stores `owner_repo` only. Fall back to splitting `owner_repo`
+            or parsing `repo_id` (e.g., "models:owner/name").
+            """
+            owner = meta.get("owner")
+            name = meta.get("name")
+            if isinstance(owner, str) and owner.strip() and isinstance(name, str) and name.strip():
+                return owner.strip(), name.strip()
+
+            owner_repo = meta.get("owner_repo")
+            if isinstance(owner_repo, str) and "/" in owner_repo:
+                o, n = owner_repo.split("/", 1)
+                return o.strip() or None, n.strip() or None
+
+            repo_id = meta.get("repo_id")
+            if isinstance(repo_id, str) and ":" in repo_id:
+                _, tail = repo_id.split(":", 1)
+                if "/" in tail:
+                    o, n = tail.split("/", 1)
+                    return (o.strip() or None), (n.strip() or None)
+            return None, None
+
+        for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
+            cleaned_docs: List[str] = []
+            row: List[Dict[str, Any]] = []
+            for doc, meta, score in zip(doc_items, meta_items, dist_items):
+                # Normalize document text (JSON-unescape and HTML-strip)
+                cleaned_text, clean_state = normalize_readme_text(doc)
+                cleaned_docs.append(cleaned_text)
+
+                meta = meta or {}
+                owner, name = _owner_name_from_meta(meta or {})
+                row.append(
+                    {
+                        "repo_author": owner,
+                        "repo_name": name,
+                        "score": float(score) if score is not None else None,
+                        "clean_state": clean_state,
+                    }
+                )
+            ret_psg.append(cleaned_docs)
+            metadata_rows.append(row)
+
+        return {"ret_psg": ret_psg, "metadata": metadata_rows}
 
     async def retriever_search_lancedb(
         self,
