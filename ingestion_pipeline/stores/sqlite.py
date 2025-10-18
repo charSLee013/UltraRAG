@@ -18,9 +18,46 @@ class SQLiteStore:
         self.db_path = db_path or os.environ.get(
             "INGESTION_SQLITE_PATH", "output/ingestion/sqlite/docs.sqlite"
         )
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._prepare_database(Path(self.db_path))
         self.conn = sqlite3.connect(self.db_path, isolation_level=None)
         self._init_schema()
+
+    def _prepare_database(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            return
+
+        wal_file = path.with_suffix(path.suffix + "-wal")
+        shm_file = path.with_suffix(path.suffix + "-shm")
+
+        def _cleanup():
+            removed = False
+            for candidate in (wal_file, shm_file):
+                if candidate.exists():
+                    candidate.unlink()
+                    removed = True
+            return removed
+
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, isolation_level=None)
+        except sqlite3.OperationalError as exc:
+            cleaned = _cleanup()
+            if cleaned:
+                try:
+                    conn = sqlite3.connect(f"file:{path}?mode=rw", uri=True, isolation_level=None)
+                except sqlite3.OperationalError as exc2:
+                    raise RuntimeError(f"SQLite recovery failed for {path}: {exc2}") from exc2
+            else:
+                raise RuntimeError(f"SQLite recovery failed for {path}: {exc}") from exc
+
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            if not row or row[0] != "ok":
+                raise RuntimeError(f"SQLite integrity check failed for {path}")
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         cur = self.conn.cursor()
