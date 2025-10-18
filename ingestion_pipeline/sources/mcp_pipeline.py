@@ -56,7 +56,7 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
     ) -> None:
         self.page_size = max(1, min(int(page_size or 100), 100))
         self.timeout = float(timeout or 60.0)
-        self.jitter_range = (0.05, 0.5)
+        self.jitter_range = (0.2, 1.5)
         self.target_repo_count = int(target_repo_count) if target_repo_count else None
 
         endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or "https://modelscope.cn"
@@ -75,12 +75,6 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
         page_number = 1
         total_pages: Optional[int] = None
         produced = 0
-        headers = {
-            "User-Agent": build_user_agent(),
-            "X-Request-ID": uuid.uuid4().hex,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
         url = f"{self._endpoint}/openapi/v1/mcp/servers"
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -92,13 +86,38 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
                     "page_size": self.page_size,
                     "search": "",
                 }
-                try:
-                    resp = await client.put(url, headers=headers, json=body)
-                    resp.raise_for_status()
-                    payload = resp.json()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[mcp.fetch] request failed page=%s err=%s", page_number, exc)
-                    # best-effort continue to next page
+                # Per-request rotating headers per SOP (UA + X-Request-ID)
+                attempt = 0
+                max_retries = 4
+                last_exc: Optional[Exception] = None
+                payload: Optional[Dict[str, object]] = None
+                while True:
+                    headers = {
+                        "User-Agent": build_user_agent(),
+                        "X-Request-ID": uuid.uuid4().hex,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    }
+                    try:
+                        resp = await client.put(url, headers=headers, json=body)
+                        # retry on 403/429/5xx
+                        if resp.status_code in {403, 429, 500, 502, 503, 504}:
+                            raise httpx.HTTPStatusError("server busy", request=resp.request, response=resp)
+                        resp.raise_for_status()
+                        payload = resp.json()
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        if attempt >= max_retries - 1:
+                            logger.warning(
+                                "[mcp.fetch] request failed page=%s err=%s", page_number, exc
+                            )
+                            # stop fetching further pages but keep previously yielded pages
+                            break
+                        await asyncio.sleep(min(8, 2 ** attempt))
+                        attempt += 1
+                if payload is None:
                     break
 
                 data = payload.get("data") or {}
