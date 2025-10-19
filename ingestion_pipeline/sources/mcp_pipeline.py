@@ -75,33 +75,29 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
         page_number = 1
         total_pages: Optional[int] = None
         produced = 0
-        url = f"{self._endpoint}/openapi/v1/mcp/servers"
+        url = f"{self._endpoint}/api/v1/dolphin/mcpServers"
+
+        # Capture headers once (async-safe), no fallback paths
+        from ..modelscope_client import build_mcp_dolphin_headers_async
+        base_headers = await build_mcp_dolphin_headers_async()
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             while True:
                 await asyncio.sleep(random.uniform(*self.jitter_range))
                 body = {
-                    "filter": {},
-                    "page_number": page_number,
-                    "page_size": self.page_size,
-                    "search": "",
+                    "PageSize": self.page_size,
+                    "PageNumber": page_number,
+                    "Query": "",
+                    "Criterion": [],
                 }
-                # Use singleton browser-like headers captured once
+                # Use singleton browser-like headers captured once (with cookies)
                 attempt = 0
                 max_retries = 4
                 last_exc: Optional[Exception] = None
                 payload: Optional[Dict[str, object]] = None
                 while True:
-                    try:
-                        from ..modelscope_client import build_mcp_openapi_headers
-                        headers = build_mcp_openapi_headers()
-                    except Exception:
-                        headers = {
-                            "User-Agent": build_user_agent(),
-                            "Accept": "application/json, text/plain, */*",
-                            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                            "Content-Type": "application/json",
-                        }
+                    headers = dict(base_headers)
+                    headers["Referer"] = f"https://modelscope.cn/mcp?page={page_number}"
                     try:
                         resp = await client.put(url, headers=headers, json=body)
                         # retry on 403/429/5xx
@@ -123,10 +119,12 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
                 if payload is None:
                     break
 
-                data = payload.get("data") or {}
-                servers = data.get("mcp_server_list") or []
+                # Dolphin payload shape: { Code, Data: { McpServer: { TotalCount, McpServers: [...] } } }
+                data = payload.get("Data") or {}
+                mcp_server = data.get("McpServer") or {}
+                servers = mcp_server.get("McpServers") or []
                 if total_pages is None:
-                    total_count = int(data.get("total_count") or 0)
+                    total_count = int(mcp_server.get("TotalCount") or 0)
                     total_pages = (total_count + self.page_size - 1) // self.page_size if total_count else None
 
                 page_docs: List[RawDocument] = []
@@ -134,14 +132,14 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
 
                 for item in servers:
                     # Extract fields
-                    sid = item.get("id") or ""
-                    if not isinstance(sid, str) or not sid.startswith("@"):
+                    publisher = item.get("Publisher") or ""
+                    if not isinstance(publisher, str) or not publisher.startswith("@"):
                         continue
-                    owner_repo = sid[1:].strip()
+                    owner_repo = publisher[1:].strip()
                     if not owner_repo or "/" not in owner_repo:
                         continue
 
-                    view_count = item.get("view_count")
+                    view_count = item.get("ViewCount")
                     try:
                         view_count = int(view_count)
                     except Exception:
@@ -195,6 +193,9 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
                     yield page_docs
                     if self.target_repo_count is not None and produced >= self.target_repo_count:
                         return
+
+                # Post-page randomized cooldown to reduce throttling
+                await asyncio.sleep(random.uniform(1.5, 10.0))
 
                 page_number += 1
                 if total_pages is not None and page_number > total_pages:
@@ -267,18 +268,11 @@ class ModelScopeMCPPipeline(BaseIngestionPipeline):
         )
 
     def _select_description(self, item: Dict[str, object]) -> str:
-        # Order: top-level description → locales.zh.description → locales.en.description
-        desc = item.get("description")
-        if isinstance(desc, str) and desc.strip():
-            return desc
-        locales = item.get("locales") if isinstance(item.get("locales"), dict) else None
-        if isinstance(locales, dict):
-            zh = locales.get("zh") if isinstance(locales.get("zh"), dict) else None
-            if zh and isinstance(zh.get("description"), str) and zh["description"].strip():
-                return zh["description"]
-            en = locales.get("en") if isinstance(locales.get("en"), dict) else None
-            if en and isinstance(en.get("description"), str) and en["description"].strip():
-                return en["description"]
+        # Dolphin fields: prefer ReadmeCN → Readme → AbstractCN → Abstract → Description
+        for key in ("ReadmeCN", "Readme", "AbstractCN", "Abstract", "Description"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
         return ""
 
     def _build_payload_dict(self, owner_repo: str, source_url: str, readme_text: str) -> Dict[str, object]:

@@ -40,26 +40,39 @@ def _capture_mcp_headers_via_playwright() -> Dict[str, str]:
             nonlocal captured
             url = req.url
             if req.method == "PUT" and ("/mcpServers" in url or "/mcp/servers" in url):
-                hdrs = dict(req.headers)
-                # Normalize keys and keep relevant ones
-                ua = hdrs.get("user-agent") or hdrs.get("User-Agent")
-                accept = hdrs.get("accept") or hdrs.get("Accept")
-                lang = (
-                    hdrs.get("x-modelscope-accept-language")
-                    or hdrs.get("accept-language")
-                    or hdrs.get("Accept-Language")
-                )
-                captured = {
-                    "User-Agent": ua or build_user_agent(),
-                    "Accept": accept or "application/json, text/plain, */*",
-                    "Accept-Language": lang or "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Content-Type": "application/json",
-                }
+                raw = dict(req.headers)
+                # Sanitize headers unsafe for httpx to set manually
+                drop = {"content-length", "host", "connection"}
+                sanitized: Dict[str, str] = {}
+                for k, v in raw.items():
+                    kl = k.lower()
+                    if kl in drop:
+                        continue
+                    # Normalize capitalization for common headers
+                    if kl == "user-agent":
+                        sanitized["User-Agent"] = v
+                    elif kl == "accept":
+                        sanitized["Accept"] = v
+                    elif kl in ("accept-language", "x-modelscope-accept-language"):
+                        sanitized["Accept-Language"] = v
+                    else:
+                        sanitized[k] = v
+                # Ensure Content-Type exists
+                if not any(k.lower() == "content-type" for k in sanitized.keys()):
+                    sanitized["Content-Type"] = "application/json"
+                captured = sanitized
 
         page.on("request", on_request)
         try:
             page.goto("https://modelscope.cn/mcp", wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
+            # Build Cookie header from context cookies
+            cookies = context.cookies("https://modelscope.cn")
+            if cookies:
+                cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                if captured is None:
+                    captured = {}
+                captured["Cookie"] = cookie_header
         finally:
             browser.close()
 
@@ -73,7 +86,7 @@ def _capture_mcp_headers_via_playwright() -> Dict[str, str]:
         }
     return captured
 
-def build_mcp_openapi_headers() -> Dict[str, str]:
+def build_mcp_dolphin_headers() -> Dict[str, str]:
     """Return browser-like headers for MCP openapi, captured once per process.
 
     Uses a singleton cache to avoid multiple browser launches.
@@ -84,6 +97,103 @@ def build_mcp_openapi_headers() -> Dict[str, str]:
     with _MCP_HEADERS_LOCK:
         if _MCP_HEADERS_CACHE is None:
             _MCP_HEADERS_CACHE = _capture_mcp_headers_via_playwright()
+    return dict(_MCP_HEADERS_CACHE)
+
+
+async def build_mcp_dolphin_headers_async() -> Dict[str, str]:
+    """Async variant using Playwright async API; caches result globally.
+
+    Use this inside asyncio code paths to avoid sync Playwright in event loop.
+    """
+    global _MCP_HEADERS_CACHE
+    if _MCP_HEADERS_CACHE is not None:
+        return dict(_MCP_HEADERS_CACHE)
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+    except Exception:
+        # Fallback to sync capture outside of loop if possible
+        return build_mcp_dolphin_headers()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        captured: Dict[str, str] | None = None
+        cookie_header: str | None = None
+        csrf_token: str | None = None
+
+        def on_request(req):
+            nonlocal captured
+            url = req.url
+            if req.method == "PUT" and ("/mcpServers" in url or "/mcp/servers" in url):
+                raw = dict(req.headers)
+                drop = {"content-length", "host", "connection"}
+                sanitized: Dict[str, str] = {}
+                for k, v in raw.items():
+                    kl = k.lower()
+                    if kl in drop:
+                        continue
+                    if kl == "user-agent":
+                        sanitized["User-Agent"] = v
+                    elif kl == "accept":
+                        sanitized["Accept"] = v
+                    elif kl in ("accept-language", "x-modelscope-accept-language"):
+                        sanitized["Accept-Language"] = v
+                    else:
+                        sanitized[k] = v
+                if not any(k.lower() == "content-type" for k in sanitized.keys()):
+                    sanitized["Content-Type"] = "application/json"
+                captured = sanitized
+
+        page.on("request", on_request)
+        try:
+            await page.goto("https://modelscope.cn/mcp", wait_until="domcontentloaded")
+            await page.wait_for_timeout(1500)
+            # Proactively trigger the same XHR the page uses, so that we capture exact headers
+            try:
+                await page.evaluate(
+                    """
+                    () => fetch('/api/v1/dolphin/mcpServers', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ PageSize: 1, PageNumber: 1, Query: '', Criterion: [] })
+                    }).catch(()=>{})
+                    """
+                )
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            cookies = await context.cookies("https://modelscope.cn")
+            if cookies:
+                cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                for c in cookies:
+                    if c.get('name') == 'csrf_token':
+                        csrf_token = c.get('value')
+        finally:
+            await browser.close()
+
+    # Ensure minimal required headers are present even if no PUT was captured
+    if captured is None:
+        captured = {}
+    captured.setdefault("User-Agent", build_user_agent())
+    captured.setdefault("Accept", "application/json, text/plain, */*")
+    captured.setdefault("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+    captured.setdefault("Content-Type", "application/json")
+    captured.setdefault("Origin", "https://modelscope.cn")
+    captured.setdefault("Sec-Fetch-Mode", "cors")
+    captured.setdefault("Sec-Fetch-Site", "same-origin")
+    captured.setdefault("Sec-Fetch-Dest", "empty")
+    captured.setdefault("sec-ch-ua", '"Chromium";v="140", "Not=A?Brand";v="24", "HeadlessChrome";v="140"')
+    captured.setdefault("sec-ch-ua-mobile", "?0")
+    captured.setdefault("sec-ch-ua-platform", '"macOS"')
+    captured.setdefault("x-modelscope-trace-id", uuid.uuid4().hex)
+    if cookie_header:
+        captured.setdefault("Cookie", cookie_header)
+    if csrf_token:
+        captured.setdefault("X-CSRF-TOKEN", csrf_token)
+    with _MCP_HEADERS_LOCK:
+        if _MCP_HEADERS_CACHE is None:
+            _MCP_HEADERS_CACHE = captured
     return dict(_MCP_HEADERS_CACHE)
 
 DEFAULT_ENDPOINT = "https://modelscope.cn"
