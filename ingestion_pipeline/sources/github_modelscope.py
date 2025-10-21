@@ -103,8 +103,12 @@ class GitHubModelScopePipeline(BaseIngestionPipeline):
                         if len(clean_text) < 7:
                             return None
                         owner_repo = f"{ORG}/{repo.name}"
-                        repo_id = owner_repo  # exact string, no prefix
-                        content_hash = sha or hashlib.sha256(clean_text.encode("utf-8")).hexdigest()
+                        repo_id = f"github:{owner_repo}"
+                        # Canonical hash ties repo and README version together
+                        if sha:
+                            content_hash = f"{repo_id}@{sha}"
+                        else:
+                            content_hash = f"{repo_id}@{hashlib.sha256(clean_text.encode('utf-8')).hexdigest()}"
                         if content_hash in existing_set or content_hash in seen_hashes:
                             return None
                         payload = {
