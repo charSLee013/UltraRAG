@@ -15,14 +15,7 @@
 | 验证与日志 | Search‑o1 pipeline 可在 `SEARCH_O1_DEBUG=1` 下写入 memory 快照；日志记录 router 判定与循环耗时；Env‑first 单测覆盖 (`tests/servers/test_generation_env_first.py`)。 | `docs/sop/search_o1_answering_sop.md` |
 
 ## 待补齐的问题（尚无 SOP 或需扩展）
-| 未完成项 | 原始需求缺口 | 下一步动作 |
-| --- | --- | --- |
-| 多轮对话与记忆 | 竞赛要求多轮问答、个性化上下文；目前仅单轮 `benchmark.get_data`。 | 设计并撰写 `docs/sop/conversation_context_manager.md`（新），实现 `conversation.context_manager` 服务器。 |
-| 证据引用与后续建议 | 原始目标强调可信、可追溯；当前输出无 cite、无 follow-up。 | 扩展 Search-o1 SOP，定义 citation 结构、自定义工具 `custom.collect_evidence`。 |
-| 多模态 & 论坛数据 | 要求涵盖代码、图片、社区问答；目前仅 README 文本。 | 编写 `docs/sop/community_corpus_ingestion.md`（新）规划 Issue/论坛/多模态采集、向量化。 |
-| Reranker & 性能预算 | 未验证 3s/10s SLA，缺少 rerank & 缓存策略。 | 更新 generation/检索 SOP，添加性能测试、SiliconFlow reranker 接口。 |
-| 结构化 API 输出 | 目标是“Query → Answer → 中间证据”结构；现依赖磁盘 JSON。 | 在 Search-o1 SOP 内新增 `RunTrace` 设计，返回内存结构并保留可选磁盘落盘。 |
-| README 语料清洗 | 当前向量库仍混入 HTML/JSON 残片，检索证据不可直接引用。 | 制定 `docs/sop/readme_ingestion_cleaning.md`（新），在 Ingestion Pipeline 中强化清洗、分段与验收指标。 |
+本阶段无新增 SOP 需求；仅聚焦“数据入库 → 工具兼容 → 检索结果”的最小交付。
 
 ## 当前流程快照（2025-10-07）
 ```
@@ -44,10 +37,10 @@
   prompt.search_o1_finalize → generation.generate
        │
   custom.output_passthrough（去停词并返回 Markdown 文本）
-
-当前完成节点：数据同步、检索闭环、通用模板与 Python API 调用路径。
-待开发节点：对话记忆、引证结构、多模态采集、性能评测、诊断工具。
 ```
+
+当前交付范围（按本项要求）：数据入库 → 工具兼容 → 检索结果。
+待开发节点：无（本阶段不包含引证结构、性能评测、诊断工具）。
 
 ## 迭代原则
 - **Specification-First**：上述待办在实现前需补充或更新相应 SOP 文档。
