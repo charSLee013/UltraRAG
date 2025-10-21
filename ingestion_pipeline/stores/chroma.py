@@ -17,7 +17,7 @@ class ChromaStore:
     def __init__(self, path: str | None = None, collection: str | None = None) -> None:
         self.path = path or os.environ.get("CHROMA_PATH", "output/ingestion/chroma")
         self.collection_name = collection or os.environ.get(
-            "CHROMA_COLLECTION", "ingestion_docs"
+            "CHROMA_COLLECTION", "modelscope_docs"
         )
         Path(self.path).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.path)

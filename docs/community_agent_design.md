@@ -6,8 +6,8 @@
 ## 已完成的工作与对应 SOP
 | 领域 | 当前成果 | 对应 SOP / 文档 |
 | --- | --- | --- |
-| README 语料抓取 | `script/modelscope_docs_sync.py` 定期同步 ModelScope README 至 `output/modelscope_docs/chroma`，支撑 Env-first 检索。 | `docs/sop/readme_retriever_hardening_sop.md` |
-| 数据入库抽象 | 正在执行的 `fetch → process → ingest` 统一管线，替代旧版 chroma retriever 流程。 | `docs/sop/ingestion_pipeline_sop.md` |
+| README 语料抓取 | 采用统一的 Ingestion Pipeline（见右列），从官方来源拉取 README 并入库。 | `docs/sop/ingestion_pipeline_sop.md` |
+| 数据入库抽象 | 单一路径的 `fetch → process → ingest` 管线（Runner + SQLite + Chroma），无备用实现。 | `docs/sop/ingestion_pipeline_sop.md` |
 | 检索-推理闭环 | 通过 Python API 以 Search‑o1 范式执行（init→loop→finalize），loop 次数由参数注入；不依赖 CLI/脚本。 | `docs/sop/search_o1_answering_sop.md` |
 | 模板与停词固化 | 使用通用模板（reasoning/refinement/finalize）与最小停词；输出协议收敛为 Markdown，由 `custom.output_passthrough` 透传。 | `docs/sop/search_o1_answering_sop.md` |
 | 自定义工具链 | `custom.search_o1_query_extract`（读 TokenContract）、`router.search_o1_check`（读 TokenContract）、`custom.output_passthrough`（去停词并透传 Markdown）。 | `docs/sop/search_o1_answering_sop.md` |
@@ -22,13 +22,13 @@
 | 多模态 & 论坛数据 | 要求涵盖代码、图片、社区问答；目前仅 README 文本。 | 编写 `docs/sop/community_corpus_ingestion.md`（新）规划 Issue/论坛/多模态采集、向量化。 |
 | Reranker & 性能预算 | 未验证 3s/10s SLA，缺少 rerank & 缓存策略。 | 更新 generation/检索 SOP，添加性能测试、SiliconFlow reranker 接口。 |
 | 结构化 API 输出 | 目标是“Query → Answer → 中间证据”结构；现依赖磁盘 JSON。 | 在 Search-o1 SOP 内新增 `RunTrace` 设计，返回内存结构并保留可选磁盘落盘。 |
-| README 语料清洗 | 当前向量库仍混入 HTML/JSON 残片，检索证据不可直接引用。 | 制定 `docs/sop/readme_ingestion_cleaning.md`（新），增强 `script/modelscope_docs_sync.py` 的清洗、分段与验收指标。 |
+| README 语料清洗 | 当前向量库仍混入 HTML/JSON 残片，检索证据不可直接引用。 | 制定 `docs/sop/readme_ingestion_cleaning.md`（新），在 Ingestion Pipeline 中强化清洗、分段与验收指标。 |
 
 ## 当前流程快照（2025-10-07）
 ```
 [数据同步]
-  script/modelscope_docs_sync.py ──> output/modelscope_docs/chroma
-                                       │
+  ingestion_pipeline（统一 Runner） ──> output/ingestion/sqlite + output/ingestion/chroma
+                                        │
 [Search-o1 Pipeline]
   retriever.retriever_init_readme
        │
@@ -133,7 +133,7 @@ Artifacts: logs/*, output/memory_*（可观测）
 
 - 脏源未移除（HTML/徽章/资源链接碎片）
   - 现象：检索段落混入非正文片段，如 `gle.com/assets/colab-badge.svg`、`Open In Colab`、`<img ...>` 残片。
-  - 成因：`script/modelscope_docs_sync.py` 将 README 原文（可能为 HTML/JSON）直接入库后再切片与嵌入，非正文元素随之进入向量库。
+  - 成因：早期入库流程将 README 原文（可能为 HTML/JSON）直接入库后再切片与嵌入，非正文元素随之进入向量库。
 
 - 切片不按段/句（易产生“半标签/半属性”）
   - 现象：出现被截断的属性或标签尾段（例：`... alt=\"Open In Colab\"`），清洗难以完全剥离。
@@ -166,8 +166,7 @@ Artifacts: logs/*, output/memory_*（可观测）
 ---
 注：本文档聚焦社区问答/Search‑o1 能力的设计与现状；与之配套的规范请见 docs/sop/search_o1_answering_sop.md 与 AGENTS.md 的检索中立章节。
 
-### Ingestion Pipeline SOP 升级说明
+### Ingestion Pipeline SOP（单一路径）
 
-- `docs/sop/chroma_retriever_sop.md` 曾定义模型库 README 同步的早期流程，在缺乏统一抽象的情况下仍然保证了最小可用的索引能力。
-- `docs/sop/ingestion_pipeline_sop.md` 在此基础上引入统一的 `fetch → process → ingest` 抽象、单队列 Runner 以及严格的两阶段写入，对原始流程做了完全替代。
-- 当新版 SOP 完成实施并通过验收后，应移除 `docs/sop/chroma_retriever_sop.md` 及其对应的旧实现文件，避免两套逻辑并存。典型路径包括：`script/modelscope_docs_sync.py`（旧同步脚本）、`stores/chroma_*`、`runner_legacy.py` 等 legacy 代码。
+- 以《docs/sop/ingestion_pipeline_sop.md》为唯一规范；统一 `fetch → process → ingest` 抽象、单队列 Runner 与两阶段写入。
+- 禁止并存备用实现与历史兜底；发现遗留脚本或并行路径应直接删除（示例：`stores/chroma_*`、`runner_legacy.py` 等）。

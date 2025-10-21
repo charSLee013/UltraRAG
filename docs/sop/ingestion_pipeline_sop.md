@@ -7,7 +7,7 @@
 - 为 UltraRAG 的所有知识来源建立统一的“获取 → 去重 → 清洗 → 切割 → 标签 → 嵌入 → 入库”范式。 
 - 以 `SourceLocator` 三元组为唯一定位键，贯穿 SQLite 与 Chroma，支撑可追溯、可审计的知识图谱。 
 - 通过抽象基类与异步编排，确保不同来源在不复制业务逻辑的情况下共享相同的质量闸与事务保证。 
-- 对齐《README Retriever SOP》《chroma_retriever_sop》和 Search-o1 中立原则，避免引入来源偏置或输出歧义。
+- 对齐《README Retriever SOP》与本 SOP（Ingestion Pipeline）以及 Search‑o1 中立原则，避免引入来源偏置或输出歧义。
 
 ## 2. 核心数据结构
 
@@ -475,7 +475,7 @@ ingestion_pipeline/
 ├── runner.py               # IngestionRunner + 嵌入限流/AIMD
 ├── stores/
 │   ├── __init__.py
-│   └── sqlite.py           # “删除→写入”两阶段 ingest 实现（可复用 chroma SOP 逻辑）
+│   └── sqlite.py           # “删除→写入”两阶段 ingest 实现（原子替换写入）
 ├── embed/
 │   ├── __init__.py
 │   └── adapters.py         # httpx 方式调用 {EMBEDDING_API_URL}/embeddings，暴露 EmbedFn
@@ -491,10 +491,10 @@ ingestion_pipeline/
 
 ## 9. 输出路径
 
-为与 `docs/sop/chroma_retriever_sop.md` 保持一致，推荐沿用相同的输出目录结构，便于后续组件共享：
+本 SOP 统一规定输出目录结构如下，便于后续组件共享：
 
 - SQLite：固定为 `output/ingestion/sqlite/docs.sqlite`（包含 `repo`、`chunks` 两张表）。**所有入库流水线必须复用这一数据库，不得为不同来源另起路径。**
-- Chroma：固定为 `output/ingestion/chroma`（集合名推荐 `ingestion_docs`，向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`repo_id`/`content_hash`/`chunk_index`/`fetched_at`）。**同样所有流水线共享该向量库，严禁分散存放。**
+- Chroma：固定为 `output/ingestion/chroma`（集合名为 `modelscope_docs`，向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`repo_id`/`content_hash`/`chunk_index`/`fetched_at`）。**同样所有流水线共享该向量库，严禁分散存放。**
 - 日志：可将每次运行的指标/告警写入 `output/ingestion/logs/`，命名规则 `run_{timestamp}.json` 或等价格式，便于审计。
 
 若未来扩展其他来源，可在相同目录下按来源类型追加子目录，但 SQLite + Chroma 路径保持不变，确保原有检索器无需修改即可读取。

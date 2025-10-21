@@ -7,9 +7,9 @@
 - 原始目标（第一阶段）：将 README 向量库接入 retriever 主线，并保持旧别名与配置向后兼容，使现有 YAML 与调用方零改动可继续运行。
 - 真实跑通要求：从“入库（同步/切片/嵌入/写库）→ 可被检索（初始化/检索/返回段落与元数据）”端到端可执行，非“逻辑通”，而是以可复现实测结果为准。
 
-## 先前两份 SOP 摘要与阶段性成果
-1) 《ModelScope 文档同步与检索集成》（docs/sop/chroma_retriever_sop.md）
-- 范围：仅同步 README/说明类文档，构建 `output/modelscope_docs/chroma` 与 `docs.sqlite`（docs/chunks/repo_state 三表），启用仓库级增量跳过。
+## 现行规范与阶段性成果
+1) 《Ingestion Pipeline SOP》（docs/sop/ingestion_pipeline_sop.md）
+- 范围：仅同步 README/说明类文档，构建 `output/ingestion/chroma` 与 `output/ingestion/sqlite/docs.sqlite`，启用增量跳过与并发控制。
 - 性能：令牌桶限速 + 批量写入 + SQLite WAL；默认 `CHUNK_WORKERS=64`。
 - 配置：最小必要 `.env` 与参数文件，明确 `CHROMA_PATH/CHROMA_COLLECTION` 与嵌入端点。
 - 成果：形成稳定的说明文档向量索引；可重复同步且对未变更仓库跳过。

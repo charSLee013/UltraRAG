@@ -7,8 +7,8 @@
 在 MCP 框架下，针对 README/说明类文档构建检索能力，为默认 RAG 以及 Search-o1/S1 等范式提供直接命中说明段落的能力。
 
 ## 约束与现状
-- 范围仅限 `script/modelscope_docs_sync.py` 同步的 README/说明集合，不接入模型二进制、代码文件或其他非说明文本。
-- 数据现状：README 向量索引位于 `output/modelscope_docs/chroma`；SQLite 仅含 `docs/chunks/repo_state` 三表，支持基于 `(repo_type, owner, name)` 的增量跳过。
+- 范围与来源：严格对齐《docs/sop/ingestion_pipeline_sop.md》，仅消费官方来源的说明类文本（README/CHANGELOG/docs 等）。
+- 数据现状：README 向量索引位于 `output/ingestion/chroma`（集合名为 `modelscope_docs`）；SQLite 位于 `output/ingestion/sqlite/docs.sqlite` 并保存最小审计信息。
 - 检索工具已就位：`retriever_init_readme` / `retriever_search_readme` 已在 `servers/retriever/src/retriever.py` 实现；旧名 `retriever_init_chroma` / `retriever_search_chroma` 作为别名直连新实现（向后兼容）。
 - YAML 已切换：`examples/rag.yaml`、`pipelines/search_o1/run.yaml` 使用 README 检索工具；Search‑o1 所需模板由 `pipelines/search_o1/parameter/run_parameter.yaml` 管理。
 - 编程风格：最小化 + fail-fast；不做运行时兜底生成冗余元数据。
@@ -36,9 +36,11 @@
 2. **配置 / 文档同步**
    - 调整 YAML / 参数文件；更新 AGENTS.md、design 文档说明 README 检索入口。
 3. **测试**
-   - 运行 `python script/modelscope_docs_sync.py --max-models 100 --max-datasets 20` 确保 Chroma 数据可用。
-   - 执行 `ultrarag run examples/rag.yaml`，确认命中 README 段落并输出链接。
-   - 运行 Search-o1/S1 流程，验证多轮检索能落到 README 片段。
+   - 先运行任一 ingestion 脚本完成入库（示例）：
+     - `python -m ingestion_pipeline.ingest_modelscope_models_readmes`
+     - 或 `python ingestion_pipeline/ingest_github_modelscope_readmes.py`
+   - 执行 `ultrarag run examples/rag.yaml`，确认命中 README 段落。
+   - 运行 Search‑o1 流程，验证多轮检索能稳定命中 README 片段。
 
 ## 验证
 - README 工具返回的 metadata 至少包含 `repo_author/repo_name`；内容与得分与查询一致。
