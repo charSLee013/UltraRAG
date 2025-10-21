@@ -43,3 +43,4 @@ servers/*/server.yaml
 src/*.egg-info/
 todo.md
 .spec-*/
+todo.md

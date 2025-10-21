@@ -11,6 +11,264 @@ import httpx
 import logging
 
 from ingestion_pipeline.modelscope_headers import build_user_agent
+import os
+from dotenv import load_dotenv
+from threading import Lock
+from typing import Any
+
+# Singleton cache for browser-like headers captured once via Playwright
+_MCP_HEADERS_CACHE: Dict[str, str] | None = None
+_MCP_HEADERS_LOCK = Lock()
+
+load_dotenv()
+
+
+def _cookie_from_env() -> Optional[str]:
+    """Return Cookie header value from .env if present."""
+    cookie = os.environ.get("MODELSCOPE_COOKIE")
+    return cookie if cookie and cookie.strip() else None
+
+def _capture_mcp_headers_via_playwright() -> Dict[str, str]:
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except Exception:
+        # Fallback to minimal headers if Playwright is unavailable
+        return {
+            "User-Agent": build_user_agent(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Content-Type": "application/json",
+        }
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        # Preload env cookie into browser context if provided
+        env_cookie = _cookie_from_env()
+        if env_cookie:
+            try:
+                cookie_parts = [p.strip() for p in env_cookie.split(';') if p.strip()]
+                for part in cookie_parts:
+                    if '=' not in part:
+                        continue
+                    name, value = part.split('=', 1)
+                    context.add_cookies([{ 'name': name, 'value': value, 'url': 'https://modelscope.cn' }])
+            except Exception:
+                pass
+        page = context.new_page()
+        captured: Dict[str, str] | None = None
+
+        def on_request(req):
+            nonlocal captured
+            url = req.url
+            if req.method == "PUT" and ("/dolphin/articles" in url or "/mcpServers" in url or "/mcp/servers" in url):
+                raw = dict(req.headers)
+                # Sanitize headers unsafe for httpx to set manually
+                drop = {"content-length", "host", "connection"}
+                sanitized: Dict[str, str] = {}
+                for k, v in raw.items():
+                    kl = k.lower()
+                    if kl in drop:
+                        continue
+                    # Normalize capitalization for common headers
+                    if kl == "user-agent":
+                        sanitized["User-Agent"] = v
+                    elif kl == "accept":
+                        sanitized["Accept"] = v
+                    elif kl == "accept-language":
+                        sanitized["Accept-Language"] = v
+                    elif kl == "x-modelscope-accept-language":
+                        sanitized["x-modelscope-accept-language"] = v
+                    else:
+                        sanitized[k] = v
+                # Ensure Content-Type exists
+                if not any(k.lower() == "content-type" for k in sanitized.keys()):
+                    sanitized["Content-Type"] = "application/json"
+                captured = sanitized
+
+        page.on("request", on_request)
+        try:
+            # Prefer capturing learn/articles; fallback to mcp
+            page.goto("https://modelscope.cn/learn?page=1&sort=gmt_modified", wait_until="domcontentloaded")
+            # Proactively trigger the articles XHR
+            try:
+                page.evaluate(
+                    """
+                    () => fetch('/api/v1/dolphin/articles', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ PageNumber: 1, PageSize: 18, Type: 2, Sort: 'gmt_modified', Query: '', ExcludeIds: [], IsCourse: [0,1] })
+                    }).catch(()=>{})
+                    """
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+            if captured is None:
+                # fallback to mcp capture
+                page.goto("https://modelscope.cn/mcp", wait_until="domcontentloaded")
+                page.wait_for_timeout(1000)
+            # Build Cookie header from context cookies
+            cookies = context.cookies("https://modelscope.cn")
+            if cookies:
+                cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                if captured is None:
+                    captured = {}
+                captured["Cookie"] = cookie_header
+        finally:
+            browser.close()
+
+    if captured is None:
+        # As a last resort return minimal headers
+        return {
+            "User-Agent": build_user_agent(),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Content-Type": "application/json",
+        }
+    # Minimal fallbacks for site-specific headers
+    captured.setdefault("x-modelscope-accept-language", "zh_CN")
+    captured.setdefault("bx-v", "2.5.31")
+    return captured
+
+def build_mcp_dolphin_headers() -> Dict[str, str]:
+    """Return browser-like headers for MCP openapi, captured once per process.
+
+    Uses a singleton cache to avoid multiple browser launches.
+    """
+    global _MCP_HEADERS_CACHE
+    if _MCP_HEADERS_CACHE is not None:
+        return dict(_MCP_HEADERS_CACHE)
+    with _MCP_HEADERS_LOCK:
+        if _MCP_HEADERS_CACHE is None:
+            _MCP_HEADERS_CACHE = _capture_mcp_headers_via_playwright()
+    return dict(_MCP_HEADERS_CACHE)
+
+
+async def build_mcp_dolphin_headers_async() -> Dict[str, str]:
+    """Async variant using Playwright async API; caches result globally.
+
+    Use this inside asyncio code paths to avoid sync Playwright in event loop.
+    """
+    global _MCP_HEADERS_CACHE
+    if _MCP_HEADERS_CACHE is not None:
+        return dict(_MCP_HEADERS_CACHE)
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+    except Exception:
+        # Fallback to sync capture outside of loop if possible
+        return build_mcp_dolphin_headers()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        # Preload env cookie into browser context if provided
+        env_cookie = _cookie_from_env()
+        if env_cookie:
+            try:
+                cookie_parts = [p.strip() for p in env_cookie.split(';') if p.strip()]
+                await context.add_cookies([
+                    {'name': name, 'value': value, 'url': 'https://modelscope.cn'}
+                    for name, value in (part.split('=', 1) for part in cookie_parts if '=' in part)
+                ])
+            except Exception:
+                pass
+        page = await context.new_page()
+        captured: Dict[str, str] | None = None
+        cookie_header: str | None = None
+        csrf_token: str | None = None
+
+        def on_request(req):
+            nonlocal captured
+            url = req.url
+            if req.method == "PUT" and ("/dolphin/articles" in url or "/mcpServers" in url or "/mcp/servers" in url):
+                raw = dict(req.headers)
+                drop = {"content-length", "host", "connection"}
+                sanitized: Dict[str, str] = {}
+                for k, v in raw.items():
+                    kl = k.lower()
+                    if kl in drop:
+                        continue
+                    if kl == "user-agent":
+                        sanitized["User-Agent"] = v
+                    elif kl == "accept":
+                        sanitized["Accept"] = v
+                    elif kl == "accept-language":
+                        sanitized["Accept-Language"] = v
+                    elif kl == "x-modelscope-accept-language":
+                        sanitized["x-modelscope-accept-language"] = v
+                    else:
+                        sanitized[k] = v
+                if not any(k.lower() == "content-type" for k in sanitized.keys()):
+                    sanitized["Content-Type"] = "application/json"
+                captured = sanitized
+
+        page.on("request", on_request)
+        try:
+            # Prefer capturing learn/articles; fallback to mcp
+            await page.goto("https://modelscope.cn/learn?page=1&sort=gmt_modified", wait_until="domcontentloaded")
+            try:
+                await page.evaluate(
+                    """
+                    () => fetch('/api/v1/dolphin/articles', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ PageNumber: 1, PageSize: 18, Type: 2, Sort: 'gmt_modified', Query: '', ExcludeIds: [], IsCourse: [0,1] })
+                    }).catch(()=>{})
+                    """
+                )
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            if captured is None:
+                await page.goto("https://modelscope.cn/mcp", wait_until="domcontentloaded")
+                try:
+                    await page.evaluate(
+                        """
+                        () => fetch('/api/v1/dolphin/mcpServers', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ PageSize: 1, PageNumber: 1, Query: '', Criterion: [] })
+                        }).catch(()=>{})
+                        """
+                    )
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1000)
+            cookies = await context.cookies("https://modelscope.cn")
+            if cookies:
+                cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                for c in cookies:
+                    if c.get('name') == 'csrf_token':
+                        csrf_token = c.get('value')
+        finally:
+            await browser.close()
+
+    # Ensure minimal required headers are present even if no PUT was captured
+    if captured is None:
+        captured = {}
+    captured.setdefault("User-Agent", build_user_agent())
+    captured.setdefault("Accept", "application/json, text/plain, */*")
+    captured.setdefault("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+    captured.setdefault("Content-Type", "application/json")
+    captured.setdefault("Origin", "https://modelscope.cn")
+    captured.setdefault("Sec-Fetch-Mode", "cors")
+    captured.setdefault("Sec-Fetch-Site", "same-origin")
+    captured.setdefault("Sec-Fetch-Dest", "empty")
+    captured.setdefault("sec-ch-ua", '"Chromium";v="140", "Not=A?Brand";v="24", "HeadlessChrome";v="140"')
+    captured.setdefault("sec-ch-ua-mobile", "?0")
+    captured.setdefault("sec-ch-ua-platform", '"macOS"')
+    captured.setdefault("x-modelscope-trace-id", uuid.uuid4().hex)
+    captured.setdefault("x-modelscope-accept-language", "zh_CN")
+    captured.setdefault("bx-v", "2.5.31")
+    if cookie_header:
+        captured.setdefault("Cookie", cookie_header)
+    if csrf_token:
+        captured.setdefault("X-CSRF-TOKEN", csrf_token)
+    with _MCP_HEADERS_LOCK:
+        if _MCP_HEADERS_CACHE is None:
+            _MCP_HEADERS_CACHE = captured
+    return dict(_MCP_HEADERS_CACHE)
 
 DEFAULT_ENDPOINT = "https://modelscope.cn"
 
@@ -100,6 +358,7 @@ class ModelScopeClient:
         for attempt in range(self.max_retries):
             try:
                 headers = kwargs.pop("headers", {})
+                # Standard headers; caller-specific headers take precedence
                 request_headers = {
                     "User-Agent": build_user_agent(),
                     "X-Request-ID": uuid.uuid4().hex,
@@ -119,6 +378,62 @@ class ModelScopeClient:
                 await asyncio.sleep(backoff)
                 backoff *= 2
         raise RuntimeError("unreachable")
+
+    async def request_dolphin_strict(self, method: str, path: str, *, json: Optional[dict] = None,
+                                     referer: Optional[str] = None) -> httpx.Response:
+        """Strict dolphin-call helper that loads Cookie/CSRF from .env and raises on non-2xx.
+
+        Example: await client.request_dolphin_strict('PUT', '/api/v1/dolphin/articles', json={...}, referer='https://modelscope.cn/learn?page=2')
+        """
+        url = f"{self.endpoint}{path}"
+        # Base headers from Playwright capture
+        try:
+            base = build_mcp_dolphin_headers()
+        except Exception:
+            base = {
+                "User-Agent": build_user_agent(),
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Origin": "https://modelscope.cn",
+            }
+        # Overlay Cookie from .env if present (single source)
+        cookie = _cookie_from_env()
+        if cookie:
+            base["Cookie"] = cookie
+            # If cookie contains csrf_token, align X-CSRF-TOKEN with it (URL-decode)
+            try:
+                parts = [p.strip() for p in cookie.split(';') if p.strip()]
+                kv = dict(p.split('=', 1) for p in parts if '=' in p)
+                csrf = kv.get('csrf_token') or kv.get('csrf_token'.upper())
+                if csrf:
+                    from urllib.parse import unquote
+                    base['X-CSRF-TOKEN'] = unquote(csrf)
+            except Exception:
+                pass
+        # Overlay explicit CSRF token from env if provided
+        env_csrf = os.environ.get("MODELSCOPE_CSRF_TOKEN")
+        if env_csrf:
+            base['X-CSRF-TOKEN'] = env_csrf
+        # Per-call adjustments
+        if referer:
+            base["Referer"] = referer
+        base["X-Modelscope-Trace-Id"] = uuid.uuid4().hex
+        base.setdefault("Accept", "application/json, text/plain, */*")
+        base.setdefault("Content-Type", "application/json")
+        base.setdefault("Origin", "https://modelscope.cn")
+        base.setdefault("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+        base.setdefault("DNT", "1")
+        base.setdefault("Sec-Fetch-Dest", "empty")
+        base.setdefault("Sec-Fetch-Mode", "cors")
+        base.setdefault("Sec-Fetch-Site", "same-origin")
+        base.setdefault("Pragma", "no-cache")
+        base.setdefault("Cache-Control", "no-cache")
+
+        async with httpx.AsyncClient(timeout=self.timeout, http2=False) as http:
+            r = await http.request(method, url, headers=base, json=json)
+            # Strict: non-2xx treated as error immediately
+            r.raise_for_status()
+            return r
 
     async def _models_page(self, page_number: int) -> Dict[str, object]:
         payload = {"Path": "", "PageNumber": page_number, "PageSize": self.model_page_size}
