@@ -34,8 +34,10 @@ Author tests with `pytest`; place them in `tests/` mirroring the package path (`
 
 
 ## Retrieval Data Sources
-- README ingestion writes to the shared stores `output/ingestion/sqlite/docs.sqlite` (SQLite) and `output/ingestion/chroma` (Chroma collection `modelscope_docs`).
-- Retriever pipelines必须使用 `retriever_init_readme` / `retriever_search_readme` 指向同一集合，只返回 `repo_author/repo_name/score`（可选 `clean_state`）。
+- 数据库位置仅由 .env 决定（Env-first）：
+  - `INGESTION_SQLITE_PATH` 指向 SQLite 文件。
+  - `CHROMA_PATH` 与 `CHROMA_COLLECTION` 指向 Chroma 集合目录与集合名。
+- Retriever 流水线必须使用 `retriever_init_readme` / `retriever_search_readme` 指向与入库一致的集合，只返回 `repo_author/repo_name/score`（可选 `clean_state`）。
 
 ## Search‑o1 Retrieval Neutrality & Anti‑Patterns
 To keep Search‑o1 flows neutral, reproducible, and auditable, follow these rules:

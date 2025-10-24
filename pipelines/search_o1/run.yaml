@@ -15,7 +15,6 @@ pipeline:
       chroma_collection: $chroma_collection
       embedding_api_url: $embedding_api_url
       embedding_api_key: $embedding_api_key
-      embedding_model: $embedding_model
       embedding_timeout: $embedding_timeout
 - prompt.search_o1_init:
     input:

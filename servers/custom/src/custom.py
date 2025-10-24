@@ -139,6 +139,28 @@ def search_o1_query_extract(
                 last_query[:200],
             )
 
+    # parse optional routing hints from the model's text (any line):
+    # mode=sqlite; source_type=models; owner_regex='qwen|llama'
+    mode, src_type, owner_rx = None, "", ""
+    for answer in ans_ls or []:
+        for line in (answer or "").splitlines():
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            m = re.search(r"\bmode\s*=\s*([A-Za-z_]+)", line_stripped)
+            if m:
+                mode = (m.group(1) or "").lower()
+            m2 = re.search(r"\bsource_type\s*=\s*([A-Za-z_]+)", line_stripped)
+            if m2:
+                src_type = m2.group(1) or ""
+            m3 = re.search(r"owner_regex\s*=\s*'([^']*)'", line_stripped)
+            if not m3:
+                m3 = re.search(r'owner_regex\s*=\s*"([^"]*)"', line_stripped)
+            if not m3:
+                m3 = re.search(r"owner_regex\s*=\s*([^;\s]+)", line_stripped)
+            if m3:
+                owner_rx = m3.group(1) or ""
+
     return {"extract_query_list": queries}
 
 

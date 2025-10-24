@@ -18,6 +18,7 @@ from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
 from ultrarag.server import UltraRAG_MCP_Server
 from ultrarag.utils import normalize_readme_text
 from pathlib import Path
+import uuid
 
 app = UltraRAG_MCP_Server("retriever")
 retriever_app = Flask(__name__)
@@ -88,6 +89,15 @@ class Retriever:
         mcp_inst.tool(
             self.retriever_search_readme,
             output="q_ls,top_k,query_instruction->ret_psg,metadata",
+        )
+        # Vector search (chunk-level) with optional owner_repo prefilter and provenance
+        mcp_inst.tool(
+            self.vector_search_chunks,
+            output="query_list,top_k,where_owner_repo_in->ret_psg,metadata,hits",
+        )
+        mcp_inst.tool(
+            self.vector_hits_provenance,
+            output="hits->prov",
         )
         mcp_inst.tool(
             self.retriever_init_readme,
@@ -681,6 +691,27 @@ class Retriever:
 
         raise RuntimeError("Failed to obtain embeddings from SiliconFlow")
 
+    def _owner_name_from_meta(self, meta: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        owner = meta.get("owner") or meta.get("owner_name")
+        name = meta.get("name") or meta.get("repo_name")
+        if isinstance(owner, str) and owner.strip() and isinstance(name, str) and name.strip():
+            return owner.strip(), name.strip()
+        owner_repo = meta.get("owner_repo")
+        if isinstance(owner_repo, str) and "/" in owner_repo:
+            o, n = owner_repo.split("/", 1)
+            return o.strip() or None, n.strip() or None
+        repo_id = meta.get("repo_id")
+        if isinstance(repo_id, str) and ":" in repo_id:
+            _, tail = repo_id.split(":", 1)
+            if "/" in tail:
+                o, n = tail.split("/", 1)
+                return (o.strip() or None), (n.strip() or None)
+        return None, None
+
+    def _make_chunk_uuid(self, repo_id: str, content_hash: str, index: int) -> str:
+        seed = f"{repo_id}:{content_hash}:{index}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
+
     async def retriever_search_readme(
         self,
         query_list: List[str],
@@ -766,6 +797,140 @@ class Retriever:
             metadata_rows.append(row)
 
         return {"ret_psg": ret_psg, "metadata": metadata_rows}
+
+    async def vector_search_chunks(
+        self,
+        query_list: List[str],
+        top_k: int = 10,
+        where_owner_repo_in: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Vector search over Chroma with optional owner_repo prefilter.
+
+        Returns ret_psg (texts) and minimal metadata rows per query.
+        """
+        if not hasattr(self, "chroma_collection"):
+            raise RuntimeError("README retriever is not initialized; call retriever_init_readme first")
+
+        if isinstance(query_list, str):
+            query_list = [query_list]
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+
+        # embed queries
+        embeddings = await self._embed_remote(query_list)
+
+        ret_psg: List[List[str]] = []
+        meta_rows: List[List[Dict[str, Any]]] = []
+        flat_hits: List[Dict[str, Any]] = []
+
+        where = None
+        if where_owner_repo_in:
+            # Limit IN list to reasonable chunks per request; Chroma will handle batching internally where possible
+            where = {"owner_repo": {"$in": list(where_owner_repo_in)}}
+
+        results = self.chroma_collection.query(
+            query_embeddings=embeddings,
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+            where=where,
+        )
+
+        documents = results.get("documents") or [[] for _ in query_list]
+        metadatas = results.get("metadatas") or [[] for _ in query_list]
+        distances = results.get("distances") or [[] for _ in query_list]
+
+        for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
+            cur_docs: List[str] = []
+            cur_meta: List[Dict[str, Any]] = []
+            for doc, meta, dist in zip(doc_items, meta_items, dist_items):
+                cleaned_text, clean_state = normalize_readme_text(doc)
+                cur_docs.append(cleaned_text)
+                m = meta or {}
+                owner, name = self._owner_name_from_meta(m)
+                score = float(dist) if dist is not None else None
+                cur_meta.append(
+                    {
+                        "repo_author": owner,
+                        "repo_name": name,
+                        "score": score,
+                        "clean_state": clean_state,
+                    }
+                )
+                flat_hits.append(
+                    {
+                        "text": cleaned_text,
+                        "distance": score,
+                        "repo_id": m.get("repo_id"),
+                        "owner_repo": m.get("owner_repo"),
+                        "chunk_index": m.get("chunk_index"),
+                        "content_hash": m.get("content_hash"),
+                    }
+                )
+            ret_psg.append(cur_docs)
+            meta_rows.append(cur_meta)
+
+        return {"ret_psg": ret_psg, "metadata": meta_rows, "hits": flat_hits}
+
+    def vector_hits_provenance(self, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Attach provenance for a flattened list of hits using SQLite repo table.
+
+        Each hit should contain at least repo_id, chunk_index, and content_hash.
+        """
+        # Guarded by SEARCH_O1_DEBUG: if not enabled, skip heavy lookup
+        dbg = os.getenv("SEARCH_O1_DEBUG")
+        if not dbg or dbg in {"0", "false", "False"}:
+            return {"prov": []}
+        try:
+            from ingestion_pipeline.stores.sqlite import SQLiteStore  # type: ignore
+        except Exception:
+            raise ImportError("ingestion_pipeline is required for provenance lookup")
+
+        store = SQLiteStore()
+        prov: List[Dict[str, Any]] = []
+        # batch fetch meta per repo_id
+        repo_ids = sorted({h.get("repo_id") for h in hits if h.get("repo_id")})
+        idx = 0
+        meta_by_repo: Dict[str, Dict[str, Any]] = {}
+        if repo_ids:
+            q = (
+                "SELECT repo_id, source_type, owner_repo, source_url, fetched_at, content_hash FROM repo WHERE repo_id IN ("
+                + ",".join(["?"] * len(repo_ids))
+                + ")"
+            )
+            for row in store.conn.execute(q, repo_ids):
+                meta_by_repo[row[0]] = {
+                    "repo_id": row[0],
+                    "source_type": row[1],
+                    "owner_repo": row[2],
+                    "source_url": row[3],
+                    "fetched_at": row[4],
+                    "content_hash": row[5],
+                }
+
+        for h in hits:
+            rid = h.get("repo_id")
+            cidx = h.get("chunk_index")
+            chash = (h.get("content_hash") or (meta_by_repo.get(rid, {}).get("content_hash")))
+            meta = meta_by_repo.get(rid, {})
+            chunk_uuid = None
+            try:
+                if rid and chash is not None and cidx is not None:
+                    chunk_uuid = self._make_chunk_uuid(str(rid), str(chash), int(cidx))
+            except Exception:
+                pass
+            prov.append(
+                {
+                    "repo_id": rid,
+                    "owner_repo": meta.get("owner_repo"),
+                    "source_type": meta.get("source_type"),
+                    "source_url": meta.get("source_url"),
+                    "fetched_at": meta.get("fetched_at"),
+                    "chunk_index": cidx,
+                    "chunk_uuid": chunk_uuid,
+                }
+            )
+            idx += 1
+        return {"prov": prov}
 
     async def retriever_search_lancedb(
         self,

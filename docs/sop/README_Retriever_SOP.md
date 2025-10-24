@@ -8,7 +8,7 @@
 
 ## 约束与现状
 - 范围与来源：严格对齐《docs/sop/ingestion_pipeline_sop.md》，仅消费官方来源的说明类文本（README/CHANGELOG/docs 等）。
-- 数据现状：README 向量索引位于 `output/ingestion/chroma`（集合名为 `modelscope_docs`）；SQLite 位于 `output/ingestion/sqlite/docs.sqlite` 并保存最小审计信息。
+- 数据现状：README 向量索引与 SQLite 位置均由 `.env` 配置：`CHROMA_PATH`/`CHROMA_COLLECTION` 与 `INGESTION_SQLITE_PATH`；运行与入库必须指向同一套环境设置以保证一致性。
 - 检索工具已就位：`retriever_init_readme` / `retriever_search_readme` 已在 `servers/retriever/src/retriever.py` 实现；旧名 `retriever_init_chroma` / `retriever_search_chroma` 作为别名直连新实现（向后兼容）。
 - YAML 已切换：`examples/rag.yaml`、`pipelines/search_o1/run.yaml` 使用 README 检索工具；Search‑o1 所需模板由 `pipelines/search_o1/parameter/run_parameter.yaml` 管理。
 - 编程风格：最小化 + fail-fast；不做运行时兜底生成冗余元数据。

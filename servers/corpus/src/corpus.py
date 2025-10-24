@@ -1,14 +1,14 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, List, Any
+import re
 
 from ultrarag.server import UltraRAG_MCP_Server
 
 app = UltraRAG_MCP_Server("corpus")
 
 
-@app.tool(output="file_path->raw_data")
 def parse_documents(file_path: Union[str, Path]) -> Dict[str, str]:
 
     try:
@@ -38,9 +38,6 @@ def parse_documents(file_path: Union[str, Path]) -> Dict[str, str]:
     return {"raw_data": raw_data}
 
 
-@app.tool(
-    output="chunk_strategy,chunk_size,raw_data,output_path,tokenizer_name_or_path->status"
-)
 async def chunk_documents(
     chunk_strategy: str,
     chunk_size: int,
@@ -97,6 +94,122 @@ async def chunk_documents(
             f.write(json.dumps(doc, ensure_ascii=False) + "\n")
 
     return {"status": "save chunks successful"}
+
+# ===============================
+# SQLite read-only helpers (ingestion DB)
+# ===============================
+try:
+    from ingestion_pipeline.stores.sqlite import SQLiteStore  # type: ignore
+except Exception:
+    SQLiteStore = None  # type: ignore
+
+
+def _get_sqlite() -> SQLiteStore:  # type: ignore
+    if SQLiteStore is None:
+        raise ImportError(
+            "ingestion_pipeline is not available; install project in editable mode."
+        )
+    store = SQLiteStore()
+    try:
+        store.conn.create_function(
+            "REGEXP", 2, lambda pattern, text: 1 if re.search(pattern or "", text or "") else 0
+        )
+    except Exception:
+        pass
+    return store
+
+
+@app.tool(output="source_type,owner_regex,limit->owner_repos,repo_ids,total")
+def sqlite_repo_search(
+    source_type: Optional[Union[str, List[str]]] = None,
+    owner_regex: Optional[Union[str, List[str]]] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """List repos from SQLite by SourceType and/or owner_repo regex.
+
+    Returns:
+      - owner_repos: List[str]
+      - repo_ids: List[str]
+      - total: int (before limit)
+    """
+    # If no filters provided, return empty candidate set to avoid scanning full table;
+    # vector layer will treat empty list as "no prefilter".
+    # Unwrap list inputs from router (it wraps scalars to satisfy validators)
+    if isinstance(source_type, list):
+        source_type = source_type[0] if source_type else None
+    if isinstance(owner_regex, list):
+        owner_regex = owner_regex[0] if owner_regex else None
+    if not (source_type and str(source_type).strip()) and not (owner_regex and str(owner_regex).strip()):
+        return {"owner_repos": [], "repo_ids": [], "total": 0}
+
+    store = _get_sqlite()
+    where = []
+    args: List[Any] = []
+    if source_type:
+        where.append("source_type = ?")
+        args.append(str(source_type))
+    if owner_regex:
+        where.append("owner_repo REGEXP ?")
+        args.append(str(owner_regex))
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    cur = store.conn.cursor()
+    total = cur.execute(
+        f"SELECT COUNT(1) FROM repo{where_sql}", args
+    ).fetchone()[0]
+    cur = store.conn.execute(
+        f"SELECT repo_id, owner_repo FROM repo{where_sql} LIMIT ?",
+        args + [max(0, int(limit))],
+    )
+    rows = cur.fetchall()
+    repo_ids = [r[0] for r in rows]
+    owner_repos = [r[1] for r in rows]
+    return {"owner_repos": owner_repos, "repo_ids": repo_ids, "total": int(total)}
+
+
+@app.tool(output="repo_id,limit,offset->chunks")
+def sqlite_chunks_by_repo(
+    repo_id: str, limit: int = 2000, offset: int = 0
+) -> Dict[str, Any]:
+    """List chunk references for a repo from SQLite (text for QA/ops)."""
+    store = _get_sqlite()
+    cur = store.conn.execute(
+        """
+        SELECT chunk_uuid, chunk_index, text
+        FROM chunks
+        WHERE repo_id = ?
+        ORDER BY chunk_index ASC
+        LIMIT ? OFFSET ?
+        """,
+        (repo_id, max(0, int(limit)), max(0, int(offset))),
+    )
+    chunks = [
+        {"chunk_uuid": row[0], "chunk_index": int(row[1]), "text": row[2]} for row in cur
+    ]
+    return {"chunks": chunks}
+
+
+@app.tool(output="repo_id->repo_meta")
+def sqlite_get_repo_meta(repo_id: str) -> Dict[str, Any]:
+    """Fetch minimal repo metadata for a given repo_id."""
+    store = _get_sqlite()
+    row = store.conn.execute(
+        """
+        SELECT repo_id, source_type, owner_repo, source_url, fetched_at, content_hash
+        FROM repo WHERE repo_id = ?
+        """,
+        (repo_id,),
+    ).fetchone()
+    if not row:
+        return {"repo_meta": None}
+    keys = [
+        "repo_id",
+        "source_type",
+        "owner_repo",
+        "source_url",
+        "fetched_at",
+        "content_hash",
+    ]
+    return {"repo_meta": {k: row[i] for i, k in enumerate(keys)}}
 
 
 if __name__ == "__main__":

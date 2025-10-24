@@ -15,10 +15,13 @@ load_dotenv()
 
 class ChromaStore:
     def __init__(self, path: str | None = None, collection: str | None = None) -> None:
-        self.path = path or os.environ.get("CHROMA_PATH", "output/ingestion/chroma")
-        self.collection_name = collection or os.environ.get(
-            "CHROMA_COLLECTION", "modelscope_docs"
-        )
+        # Env-first, no silent fallback: require CHROMA_PATH when path is not provided
+        self.path = path or os.environ.get("CHROMA_PATH")
+        if not self.path:
+            raise RuntimeError(
+                "CHROMA_PATH is not set. Configure it in your .env to point to the active collection directory."
+            )
+        self.collection_name = collection or os.environ.get("CHROMA_COLLECTION", "modelscope_docs")
         Path(self.path).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.path)
         self.col = self.client.get_or_create_collection(self.collection_name)
