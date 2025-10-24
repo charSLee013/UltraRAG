@@ -1,6 +1,6 @@
 # SOP: Search‑o1 Answering Loop (Noise‑Free Spec)
 
-版本：2025-10-05  
+版本：2025-10-24  
 负责人：<待指定>
 
 ## 1. 目的与边界
@@ -42,11 +42,13 @@
 - 说明：回答阶段仅产出 Markdown 文本；控制标记仅用于路由/截断，下游若需盒装/JSON 由其自身适配。
 
 ## 4. 固定中间件
-- **Env-first**：Runner 启动时永远 `load_dotenv()`，并使用环境变量作为默认配置；缺失关键变量时立即 fail-fast。
+- **Env-first（单一路径）**：Runner 启动即 `load_dotenv()`；关键配置仅从 `.env` 读取，缺失立即 fail‑fast。
+  - 生成端：仅读取 `LLM_BASE_URL`、`LLM_MODEL_NAME`（必填）与 `LLM_API_KEY`（可选），不再从 YAML 或其它环境名回退。
+  - 检索端：读取 `CHROMA_PATH`、`CHROMA_COLLECTION`、`EMBEDDING_API_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MODEL`；其中 `EMBEDDING_MODEL` 仅来自 `.env`，不得由 YAML 覆盖。
 - **观测链路**：
   - INFO：恒定输出（每轮 router 判定、TokenContract 名称、耗时摘要）。
-  - DEBUG：由单一开关 `SEARCH_O1_DEBUG` 控制；开启时同时打印最新查询（截断 200 字符）并写入 memory 快照，关闭时两者均停用。
-  - Memory 快照：默认随 DEBUG 开关启用，写入 `output/memory_*`，用于排查审计。
+  - DEBUG：由 `SEARCH_O1_DEBUG` 控制，仅扩展调试日志与可选溯源。
+  - Memory 快照：始终写入 `output/memory__run_*.json` 以便审计复现；DEBUG 仅决定是否追加更详细的调试与溯源数据。
 
 ### 4.1 终止标记与 stop 策略（重要更正）
 - 生成阶段【不要】在采样参数里配置控制标记为 `stop`（如 `"<<FINAL_ANSWER_END>>"`, `"<<SRCH_Q_END>>"`）。
@@ -68,10 +70,10 @@
    为保证 README 检索可用，流水线在最前加入 `retriever.retriever_init_readme` 完成索引/嵌入端点初始化（env-first，缺失即 fail-fast）。
 
 ## 6. Runner 职责
-1. 加载配置（`.env` → CLI/参数文件 → TokenContract/TemplatePlan）。
+1. 加载配置：`load_dotenv()` 后验证必填环境变量，再读取 pipeline YAML 与参数文件注入 TokenContract/TemplatePlan。
 2. 初始化各组件（router/query extractor/retriever 等），将契约对象注入；若 README 检索尚未初始化，立即执行 `retriever_init_readme`。
 3. 按“init → loop → finalize”顺序执行。
-4. 返回最终文本；在 `SEARCH_O1_DEBUG` 打开时写入 memory 快照。
+4. 返回最终文本；始终写入 memory 快照（DEBUG 仅影响额外调试字段）。
 
 附：Programmatic Mode 允许以 `seed_vars={"q_ls":[question]}` 方式预置首轮输入；实现层需在 IO 提取前预置这些变量，避免“第一步找不到 q_ls”。
 
@@ -92,7 +94,7 @@
 | `pipelines/search_o1/parameter/run_parameter.yaml` | pipelines | 旧参数快照 | **保留并更新**：迁移至 Markdown-only 配置 |
 | `pipelines/search_o1/server/run_server.yaml` | pipelines | 旧服务器组合 | **保留并更新**：限定 Search-o1 所需服务 |
 | `script/run_search_o1.py` | script | 旧项目便捷脚本 | **Deprecated（legacy demo）**：正式路径使用 Python API（见“执行方式”） |
-| `output/memory_*search_o1*.json` | output | 旧跑批产生的记录 | **归档参考**：新流程仅在 DEBUG 时写入；旧文件保留供排查 |
+| `output/memory_*search_o1*.json` | output | 旧跑批产生的记录 | **归档参考**：新流程始终写入；DEBUG 增强溯源信息 |
 | `tests/servers/test_router_search_o1_check.py` | tests | 覆盖 router 判定 | **保留**：需更新断言以读取 TokenContract |
 | `tests/servers/test_custom_search_o1_tools.py` | tests | 覆盖 query 抽取与输出 | **保留**：扩展覆盖空查询与 Markdown 透传 |
 | `tests/servers/test_generation_env_first.py` | tests | 验证 Env-first 行为与停词 | **保留**：继续作为回归基线 |
@@ -153,35 +155,12 @@ rg -n "\\\\boxed\{|output_extract_from_boxed|ensure_stop" -- src servers prompt 
 rg -n "<<SRCH_Q_BEGIN>>|<<SRCH_Q_END>>|<<FINAL_ANSWER_END>>" src servers | rg -v "TokenContract|parameter|template|jinja" && exit 1 || true
 ```
 
-## 12. 执行计划（Execution Plan）
-（2025-10-08 更正补充）
-- 终止策略更正：移除采样层 stop（不再将 `<<FINAL_ANSWER_END>>`/`<<SRCH_Q_END>>` 配置到 stop），由 Router/Extractor/Passthrough 识别/剥离。
-- 流水线补充 README 检索初始化：在 run.yaml 首步加入 `retriever.retriever_init_readme`。
-- 参数作用域收敛：在 run.yaml 中使用每 server 的本地键（如 `$model_name/$base_url/$top_k`），避免 `$server.key` 交叉作用域导致解析失败。
-- Programmatic 种子：允许以 `seed_vars={"q_ls":[question]}` 方式注入，Runner 需在 IO 抽取前预置。
-**Phase A：资产盘点与价值甄别（优先完成）**
-- 列出所有遗留 Search‑o1 相关文件：`servers/router/src/router.py`、`servers/custom/src/custom.py`、`prompt/search_o1_*.jinja`、`examples/search_o1*.yaml`、`script/run_search_o1.py`、`src/ultrarag/client.py`、相关测试与文档引用。
-- 将可复用逻辑（router 判定、query 抽取、retriever、client 框架等）标记为“保留待改造”；将盒装输出、停词兜底、examples YAML 等列入“待移除”。
-- 输出盘点清单，确保后续改动范围透明且无遗漏。
-
-**Phase B：主线路实现（按顺序执行）**
-1. **契约注入**：
-   - 重构 router/query extractor 以接受 TokenContract；参数来源于 `pipelines/search_o1/token_contract.yaml`。
-   - 新增 `custom.output_passthrough` 并替换所有 boxed 相关调用；删除 `search_o1_ensure_stop` 与 `output_extract_from_boxed`。
-2. **模板与配置**：
-   - 重写 `prompt/search_o1_{reasoning,refinement,finalize}.jinja` 为纯 Markdown 指令；去除任何盒装/停词字面量。
-   - 在 `pipelines/search_o1/` 内建立 `run.yaml`、`template_plan.yaml`、`parameters.yaml`，仅引用上述模板与工具。
-3. **API 封装**：
-   - 实现 `SearchO1Pipeline`（`src/ultrarag/api.py`），加载配置与 TokenContract，提供 `query()`/`batch_query()` 等接口并作为唯一入口。
-4. **观测与测试**：
-   - 扩充单测：router/token_contract、query extractor 空查询、`output_passthrough`、API 缺 env fail-fast、DEBUG 开关写 memory。
-   - 静态校验：`rg '<\|begin_search_query\|>' src` 仅命中配置或模板变量；`rg '\\boxed'` 确认无残留。
-
-**Phase C：彻底清理（实现后立即执行）**
-- 删除 `examples/search_o1.yaml` 及相关参数文件；移除文档、README、笔记中的旧引用。
-- 移除代码中所有盒装/兜底停词实现与测试；确保新版 Markdown 输出成为唯一路径。
-- 清理输出产物：删除历史 `output_extract_from_boxed`、`search_o1_ensure_stop` 相关日志描述；归档必要的老文件到 `docs/sop/archive/`。
-- 在完成清理后复跑 `SearchO1Pipeline.query()` 验证 Markdown 输出正确，并更新盘点清单状态为“已迁移/已删除”。
+## 12. 执行计划回顾（已完成）
+本节保留 2025-10-08 的执行计划作为变更背景。Phase A/B/C 均已落地，当前代码已经：
+- 移除采样层 stop，`retriever.retriever_init_readme` 固化为首步，参数作用域仅使用本地键。
+- 替换全部盒装/兜底逻辑，`custom.output_passthrough` 成为唯一输出路径；模板与 TokenContract 均来自 `pipelines/search_o1/*`。
+- `SearchO1Pipeline` 提供唯一 API 入口，并附带 DEBUG 观测、CI 守卫与回归测试。
+如需未来扩展，请在更新本 SOP 后另行提出新版执行计划。
 
 ## 13. 验收场景（Real Scenarios）
 基于 ModelScope README 语料（HuggingFace 镜像），用于小而真实的验证；要求模板与代码中无任何领域枚举或品牌白名单。
