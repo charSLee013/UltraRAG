@@ -56,46 +56,29 @@ class SearchO1Pipeline:
         return url
 
     def _resolve_generation_settings(self) -> Dict[str, str | None]:
-        generation_cfg = self.parameters.get("generation", {}) or {}
+        """Resolve generation settings from environment only (Env-first, single path).
+
+        Per SOP, runtime configuration must be sourced from .env (loaded at process
+        start) without parallel fallbacks. Required keys are:
+        - LLM_BASE_URL
+        - LLM_MODEL_NAME
+        Optional:
+        - LLM_API_KEY
+        """
         env = os.environ
-        base_url = (
-            env.get("LLM_BASE_URL")
-            or env.get("OPENAI_BASE_URL")
-            or env.get("BASE_URL")
-            or generation_cfg.get("base_url")
-        )
-        model_name = (
-            env.get("LLM_MODEL_NAME")
-            or env.get("MODEL_NAME")
-            or env.get("LLM_MODEL")
-            or generation_cfg.get("model_name")
-        )
-        api_key = (
-            env.get("LLM_API_KEY")
-            or env.get("OPENAI_API_KEY")
-            or env.get("API_KEY")
-            or generation_cfg.get("api_key")
-        )
-        return {
-            "base_url": base_url,
-            "model_name": model_name,
-            "api_key": api_key,
-        }
+        base_url = env.get("LLM_BASE_URL")
+        model_name = env.get("LLM_MODEL_NAME")
+        api_key = env.get("LLM_API_KEY")
+        return {"base_url": base_url, "model_name": model_name, "api_key": api_key}
 
     def _ensure_generation_prereqs(self) -> Dict[str, str | None]:
         settings = self._resolve_generation_settings()
-        missing = [
-            key
-            for key in ("base_url", "model_name")
-            if not (settings.get(key) or "")
-        ]
+        missing = [key for key in ("base_url", "model_name") if not (settings.get(key) or "")]
         if missing:
             missing_str = ", ".join(missing)
             raise RuntimeError(
                 "Missing generation settings: "
-                f"{missing_str}. Set the appropriate environment variables ("
-                "LLM_BASE_URL, LLM_MODEL_NAME) or provide overrides in "
-                "pipelines/search_o1/parameter/run_parameter.yaml."
+                f"{missing_str}. Configure them in your .env (LLM_BASE_URL, LLM_MODEL_NAME)."
             )
         return settings
 
