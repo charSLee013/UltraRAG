@@ -1,86 +1,82 @@
-# 工具/提示词“接口描述”。为每个 server 写明代码路径和各 tool/prompt 的入参键与出参名（schema），供客户端启动 MCP 进程并做参数校验/映射。
-# 通常由 build 生成，不需要手改。
-
 custom:
+  parameter: servers/custom/parameter.yaml
   path: servers/custom/src/custom.py
   tools:
-    search_o1_query_extract:
-      input:
-        ans_ls: ans_ls
-        token_contract: $token_contract
-      output:
-      - extract_query_list
     output_passthrough:
       input:
         ans_ls: ans_ls
-        token_contract: $token_contract
+        token_contract: token_contract
       output:
       - markdown_ls
+    search_o1_query_extract:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - extract_query_list
 generation:
+  parameter: servers/generation/parameter.yaml
   path: servers/generation/src/generation.py
   tools:
     generate:
       input:
-        prompt_ls: prompt_ls
-        model_name: $model_name
-        base_url: $base_url
-        sampling_params: $sampling_params
         api_key: $api_key
+        base_url: $base_url
+        model_name: $model_name
+        prompt_ls: prompt_ls
+        sampling_params: $sampling_params
       output:
       - ans_ls
 prompt:
+  parameter: servers/prompt/parameter.yaml
   path: servers/prompt/src/prompt.py
   prompts:
-    search_o1_init:
+    search_o1_finalize:
       input:
-        q_ls: q_ls
+        goal_description: token_contract
+        prompt_ls: prompt_ls
         template: $template
-        goal_description: $goal_description
-        token_contract: $token_contract
       output:
       - prompt_ls
-    searcho1_reasoning_indocument:
+    search_o1_init:
       input:
-        prompt_ls: prompt_ls
-        extract_query_list: extract_query_list
-        ret_psg: ret_psg
+        goal_description: token_contract
+        q_ls: q_ls
         template: $template
-        goal_description: $goal_description
-        token_contract: $token_contract
       output:
       - prompt_ls
     search_o1_insert:
       input:
-        prompt_ls: prompt_ls
         ans_ls: ans_ls
-        token_contract: $token_contract
+        prompt_ls: prompt_ls
+        token_contract: token_contract
       output:
       - prompt_ls
-    search_o1_finalize:
+    searcho1_reasoning_indocument:
       input:
+        extract_query_list: extract_query_list
+        goal_description: token_contract
         prompt_ls: prompt_ls
+        ret_psg: ret_psg
         template: $template
-        goal_description: $goal_description
-        token_contract: $token_contract
       output:
       - prompt_ls
 retriever:
+  parameter: servers/retriever/parameter.yaml
   path: servers/retriever/src/retriever.py
   tools:
     retriever_init_readme:
       input:
-        chroma_path: $chroma_path
         chroma_collection: $chroma_collection
-        embedding_api_url: $embedding_api_url
+        chroma_path: $chroma_path
         embedding_api_key: $embedding_api_key
-        embedding_model: $embedding_model
+        embedding_api_url: $embedding_api_url
         embedding_timeout: $embedding_timeout
-      output: []
     retriever_search_readme:
       input:
-        query_list: extract_query_list
-        top_k: $top_k
         query_instruction: $query_instruction
+        query_list: q_ls
+        top_k: $top_k
       output:
       - ret_psg
       - metadata
@@ -90,6 +86,6 @@ router:
     search_o1_check:
       input:
         ans_ls: ans_ls
-        token_contract: $token_contract
+        token_contract: token_contract
       output:
       - ans_ls
