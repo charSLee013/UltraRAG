@@ -20,7 +20,7 @@
 ## 当前流程快照（2025-10-07）
 ```
 [数据同步]
-  ingestion_pipeline（统一 Runner） ──> output/ingestion/sqlite + output/ingestion/chroma
+  ingestion_pipeline（统一 Runner） ──> SQLite 与 Chroma（由 .env 的 INGESTION_SQLITE_PATH / CHROMA_PATH / CHROMA_COLLECTION 指定）
                                         │
 [Search-o1 Pipeline]
   retriever.retriever_init_readme

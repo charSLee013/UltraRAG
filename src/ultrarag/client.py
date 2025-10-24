@@ -935,7 +935,10 @@ async def run(
     logger.info("Initializing servers...")
     client = Client(mcp_cfg)
     Data: UltraData = UltraData(
-        config_path, server_configs=server_cfg, parameter_file=param_config_path
+        config_path,
+        server_configs=server_cfg,
+        seed_vars=seed_vars,
+        parameter_file=param_config_path,
     )
 
     async def execute_steps(
@@ -1070,12 +1073,10 @@ async def run(
         logger.info(f"Available tools: {tool_name_lst}")
         result = await execute_steps(pipeline_cfg)
         logger.info(f"Pipeline execution completed.")
-        # save memory snapshots when debug flag is enabled
-        debug_enabled = os.getenv("SEARCH_O1_DEBUG")
-        if debug_enabled and debug_enabled not in ("0", "false", "False"):
-            Data.write_memory_output(
-                cfg_name, datetime.now().strftime("%Y%m%d_%H%M%S")
-            )
+        # always save memory snapshots (persist full content for audit)
+        Data.write_memory_output(
+            cfg_name, datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
         return result.data
 
 

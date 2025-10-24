@@ -9,7 +9,7 @@
 
 ## 现行规范与阶段性成果
 1) 《Ingestion Pipeline SOP》（docs/sop/ingestion_pipeline_sop.md）
-- 范围：仅同步 README/说明类文档，构建 `output/ingestion/chroma` 与 `output/ingestion/sqlite/docs.sqlite`，启用增量跳过与并发控制。
+- 范围：仅同步 README/说明类文档，构建由 `.env` 定义的 Chroma/SQLite（`CHROMA_PATH/CHROMA_COLLECTION` 与 `INGESTION_SQLITE_PATH`），启用增量跳过与并发控制。
 - 性能：令牌桶限速 + 批量写入 + SQLite WAL；默认 `CHUNK_WORKERS=64`。
 - 配置：最小必要 `.env` 与参数文件，明确 `CHROMA_PATH/CHROMA_COLLECTION` 与嵌入端点。
 - 成果：形成稳定的说明文档向量索引；可重复同步且对未变更仓库跳过。

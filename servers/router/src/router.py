@@ -144,5 +144,65 @@ def search_o1_check(
     return {"ans_ls": routed}
 
 
+@app.tool(output="ans_ls,token_contract,route,sql_source_type,sql_owner_regex->ans_ls,router_source_type,router_owner_regex")
+def search_o1_route_select(
+    ans_ls: List[str],
+    token_contract: Dict[str, Any],
+    route: str | None = None,
+    sql_source_type: str | None = None,
+    sql_owner_regex: str | None = None,
+) -> Dict[str, List[Dict[str, str]]]:
+    """Select route for Search‑o1: retrieve (vector) / retrieve_sql / stop.
+
+    Rules:
+      - end_answer → stop
+      - explicit route == 'sqlite' → retrieve_sql
+      - else if sql_source_type or sql_owner_regex set → retrieve_sql
+      - else → retrieve (vector)
+    """
+
+    end_answer = _contract_token(token_contract, "end_answer")
+
+    def _parse_hints(text: str) -> dict:
+        # naive key=value parser for hints like: mode=sqlite; source_type=models; owner_regex='qwen'
+        hints = {}
+        for part in text.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip().strip("'\"")
+                hints[k] = v
+        return hints
+
+    parsed_source_type = sql_source_type
+    parsed_owner_regex = sql_owner_regex
+
+    def route_state(text: str) -> str:
+        nonlocal parsed_source_type, parsed_owner_regex
+        if end_answer and end_answer in text:
+            return "stop"
+        hints = _parse_hints(text)
+        if not parsed_source_type:
+            parsed_source_type = hints.get("source_type", parsed_source_type)
+        if not parsed_owner_regex:
+            parsed_owner_regex = hints.get("owner_regex", parsed_owner_regex)
+        hinted_mode = (hints.get("mode") or "").lower()
+        if (route or "").lower() == "sqlite" or hinted_mode == "sqlite" or (parsed_source_type or parsed_owner_regex):
+            return "retrieve_sql"
+        return "retrieve"
+
+    routed = [
+        {
+            "data": answer,
+            "state": route_state(answer),
+        }
+        for answer in ans_ls
+    ]
+    # To satisfy array-typed output validators, wrap scalars into single-item lists.
+    out_src = [parsed_source_type] if parsed_source_type else []
+    out_rex = [parsed_owner_regex] if parsed_owner_regex else []
+    return {"ans_ls": routed, "router_source_type": out_src, "router_owner_regex": out_rex}
+
+
 if __name__ == "__main__":
     app.run(transport="stdio")

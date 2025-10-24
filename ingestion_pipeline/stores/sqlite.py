@@ -15,9 +15,12 @@ load_dotenv()
 
 class SQLiteStore:
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or os.environ.get(
-            "INGESTION_SQLITE_PATH", "output/ingestion/sqlite/docs.sqlite"
-        )
+        # Env-first, no silent fallback: require INGESTION_SQLITE_PATH when db_path is not provided
+        self.db_path = db_path or os.environ.get("INGESTION_SQLITE_PATH")
+        if not self.db_path:
+            raise RuntimeError(
+                "INGESTION_SQLITE_PATH is not set. Configure it in your .env to the active SQLite file."
+            )
         self._prepare_database(Path(self.db_path))
         self.conn = sqlite3.connect(self.db_path, isolation_level=None)
         self._init_schema()
@@ -76,6 +79,10 @@ class SQLiteStore:
                 fetched_at TEXT NOT NULL
             )
             """
+        )
+        # 索引：来源过滤与仓库检索
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_repo_source_owner ON repo(source_type, owner_repo)"
         )
         # chunks 表：严格最小列集（不存 locator_* / embedding）
         cur.execute(

@@ -48,7 +48,7 @@ class ModelScopeModelsPipeline(BaseIngestionPipeline):
         timeout: float | None = 60.0,
     ) -> None:
         # Hard threshold: only ingest models with Stars >= 2
-        self._min_stars = 2
+        self._min_stars = 10
         self.target_repo_count = int(target_repo_count) if target_repo_count else None
         self.timeout = float(timeout or 60.0)
         self.page_size = max(1, min(int(model_page_size or 100), 100))

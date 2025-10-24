@@ -493,8 +493,8 @@ ingestion_pipeline/
 
 本 SOP 统一规定输出目录结构如下，便于后续组件共享：
 
-- SQLite：固定为 `output/ingestion/sqlite/docs.sqlite`（包含 `repo`、`chunks` 两张表）。**所有入库流水线必须复用这一数据库，不得为不同来源另起路径。**
-- Chroma：固定为 `output/ingestion/chroma`（集合名为 `modelscope_docs`，向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`repo_id`/`content_hash`/`chunk_index`/`fetched_at`）。**同样所有流水线共享该向量库，严禁分散存放。**
+- SQLite：路径由 `.env` 的 `INGESTION_SQLITE_PATH` 指定（包含 `repo`、`chunks` 两张表）。**所有入库流水线必须复用同一 SQLite 文件，由环境变量统一配置。**
+- Chroma：目录与集合由 `.env` 的 `CHROMA_PATH` 与 `CHROMA_COLLECTION` 指定（向量 metadata 必须带 `source_type`/`owner_repo`/`source_url`/`repo_id`/`content_hash`/`chunk_index`/`fetched_at`）。**同样所有流水线共享该集合，由环境变量统一配置。**
 - 日志：可将每次运行的指标/告警写入 `output/ingestion/logs/`，命名规则 `run_{timestamp}.json` 或等价格式，便于审计。
 
 若未来扩展其他来源，可在相同目录下按来源类型追加子目录，但 SQLite + Chroma 路径保持不变，确保原有检索器无需修改即可读取。
