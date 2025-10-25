@@ -39,7 +39,7 @@
    - 先运行任一 ingestion 脚本完成入库（示例）：
      - `python -m ingestion_pipeline.ingest_modelscope_models_readmes`
      - 或 `python ingestion_pipeline/ingest_github_modelscope_readmes.py`
-   - 执行 `ultrarag run examples/rag.yaml`，确认命中 README 段落。
+   - 通过 Python API 触发检索（参见 `docs/sop/search_o1_answering_sop.md` 的 API 示例），确认命中 README 段落。
    - 运行 Search‑o1 流程，验证多轮检索能稳定命中 README 片段。
 
 ## 验证
