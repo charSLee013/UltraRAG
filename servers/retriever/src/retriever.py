@@ -726,16 +726,17 @@ class Retriever:
         if top_k <= 0:
             raise ValueError("top_k must be a positive integer")
 
-        filtered_queries = [
-            query.strip()
-            for query in query_list
+        valid_entries = [
+            (idx, query.strip())
+            for idx, query in enumerate(query_list)
             if isinstance(query, str) and query.strip()
         ]
 
-        if not filtered_queries:
+        if not valid_entries:
             empty = [[] for _ in query_list]
             return {"ret_psg": empty, "metadata": empty}
 
+        filtered_queries = [query for _, query in valid_entries]
         queries = [f"{query_instruction}{query}" for query in filtered_queries]
         embeddings = await self._embed_remote(queries)
 
@@ -796,7 +797,14 @@ class Retriever:
             ret_psg.append(cleaned_docs)
             metadata_rows.append(row)
 
-        return {"ret_psg": ret_psg, "metadata": metadata_rows}
+        # Reconstruct full alignment, keeping placeholders for skipped/blank queries
+        aligned_ret_psg: List[List[str]] = [[] for _ in query_list]
+        aligned_metadata: List[List[Dict[str, Any]]] = [[] for _ in query_list]
+        for (idx, _), docs, metas in zip(valid_entries, ret_psg, metadata_rows):
+            aligned_ret_psg[idx] = docs
+            aligned_metadata[idx] = metas
+
+        return {"ret_psg": aligned_ret_psg, "metadata": aligned_metadata}
 
     async def vector_search_chunks(
         self,

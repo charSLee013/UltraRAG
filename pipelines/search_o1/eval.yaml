@@ -1,0 +1,87 @@
+servers:
+  benchmark: servers/benchmark
+  retriever: servers/retriever
+  prompt: servers/prompt
+  generation: servers/generation
+  router: servers/router
+  custom: servers/custom
+  evaluation: servers/evaluation
+
+pipeline:
+- benchmark.get_data
+- retriever.retriever_init_readme:
+    input:
+      chroma_path: $chroma_path
+      chroma_collection: $chroma_collection
+      embedding_api_url: $embedding_api_url
+      embedding_api_key: $embedding_api_key
+      embedding_timeout: $embedding_timeout
+- prompt.search_o1_init:
+    input:
+      q_ls: q_ls
+      template: $init_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+- loop:
+    times: 2
+    steps:
+    - branch:
+        router:
+        - router.search_o1_check:
+            input:
+              token_contract: $token_contract
+        branches:
+          retrieve:
+          - custom.search_o1_query_extract:
+              input:
+                token_contract: $token_contract
+          - retriever.retriever_search_readme:
+              input:
+                query_list: extract_query_list
+                query_instruction: $query_instruction
+                top_k: $top_k
+          - prompt.searcho1_reasoning_indocument:
+              input:
+                template: $reasoning_template
+                goal_description: $goal_description
+                token_contract: $token_contract
+          - generation.generate:
+              input:
+                model_name: $model_name
+                base_url: $base_url
+                sampling_params: $sampling_params
+                api_key: $api_key
+          - prompt.search_o1_insert:
+              input:
+                token_contract: $token_contract
+          - generation.generate:
+              input:
+                model_name: $model_name
+                base_url: $base_url
+                sampling_params: $sampling_params
+                api_key: $api_key
+          stop: []
+- prompt.search_o1_finalize:
+    input:
+      template: $finalize_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+- custom.output_passthrough:
+    input:
+      token_contract: $token_contract
+- evaluation.evaluate:
+    input:
+      pred_ls: markdown_ls
+      gt_ls: gt_ls

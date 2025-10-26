@@ -165,7 +165,7 @@ async def generate(
         else:
             raise ValueError(f"Unsupported message format: {m}")
 
-    sem = asyncio.Semaphore(8)
+    sem = asyncio.Semaphore(4)
 
     if _debug_enabled():
         stop_list = (
@@ -217,8 +217,14 @@ async def generate(
                         "Invalid or missing LLM_API_KEY."
                     ) from e
                 except Exception as e:
-                    app.logger.warning(f"[Retry {attempt+1}] Failed (idx={idx}): {e}")
-                    await asyncio.sleep(delay)
+                    sleep_for = delay
+                    status = getattr(e, "status_code", None)
+                    if status == 429:
+                        sleep_for = 30
+                    app.logger.warning(
+                        f"[Retry {attempt+1}] Failed (idx={idx}): {e}. Will retry in {sleep_for}s"
+                    )
+                    await asyncio.sleep(sleep_for)
             return idx, "[ERROR]"
 
     tasks = [asyncio.create_task(call_with_retry(i, p)) for i, p in enumerate(prompts)]
