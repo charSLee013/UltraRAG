@@ -228,15 +228,40 @@ def save_evaluation_results(
     return {"eval_res": results}
 
 
-@app.tool(output="pred_ls,gt_ls,metrics,save_path->eval_res")
+@app.tool(output="pred_ls,gt_ls,metrics,save_path,q_ls->eval_res")
 def evaluate(
     pred_ls: List[str],
     gt_ls: List[List[str]],
     metrics: List[str] | None,
     save_path: str,
+    q_ls: List[str] | None = None,
 ) -> Dict[str, Any]:
+    """Compute metrics and write a JSON report.
+
+    Now also embeds per-item records with question, golden answers, and prediction
+    to make results self-contained for inspection.
+    """
+    # Compute metric arrays and averages
     results = compute_metrics(gt_ls, pred_ls, metrics)
-    return save_evaluation_results(results, save_path)
+
+    # Build per-item records (best-effort if lengths differ)
+    n = min(len(pred_ls or []), len(gt_ls or []), len(q_ls or []) if q_ls else len(pred_ls or []))
+    metric_keys = [k for k in results.keys() if not k.startswith("avg_") and isinstance(results[k], list)]
+    records: List[Dict[str, Any]] = []
+    for i in range(n):
+        item_metrics = {mk: (results.get(mk, [None] * n)[i]) for mk in metric_keys}
+        rec: Dict[str, Any] = {
+            "question": (q_ls[i] if (q_ls and i < len(q_ls)) else None),
+            "golden_answers": gt_ls[i] if i < len(gt_ls) else [],
+            "pred": pred_ls[i] if i < len(pred_ls) else "",
+            "metrics": item_metrics,
+        }
+        records.append(rec)
+
+    # Attach records into results and save
+    results_with_records: Dict[str, Any] = dict(results)
+    results_with_records["records"] = records
+    return save_evaluation_results(results_with_records, save_path)
 
 
 if __name__ == "__main__":

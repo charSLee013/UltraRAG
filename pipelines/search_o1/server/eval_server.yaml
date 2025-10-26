@@ -1,0 +1,114 @@
+benchmark:
+  parameter: servers/benchmark/parameter.yaml
+  path: servers/benchmark/src/benchmark.py
+  tools:
+    get_data:
+      input:
+        benchmark: $benchmark
+      output:
+      - q_ls
+      - gt_ls
+custom:
+  parameter: servers/custom/parameter.yaml
+  path: servers/custom/src/custom.py
+  tools:
+    output_passthrough:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - markdown_ls
+    search_o1_query_extract:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - extract_query_list
+evaluation:
+  parameter: servers/evaluation/parameter.yaml
+  path: servers/evaluation/src/evaluation.py
+  tools:
+    evaluate:
+      input:
+        pred_ls: pred_ls
+        gt_ls: gt_ls
+        q_ls: q_ls
+        metrics: $metrics
+        save_path: $save_path
+      output:
+      - eval_res
+generation:
+  parameter: servers/generation/parameter.yaml
+  path: servers/generation/src/generation.py
+  tools:
+    generate:
+      input:
+        api_key: $api_key
+        base_url: $base_url
+        model_name: $model_name
+        prompt_ls: prompt_ls
+        sampling_params: $sampling_params
+      output:
+      - ans_ls
+prompt:
+  parameter: servers/prompt/parameter.yaml
+  path: servers/prompt/src/prompt.py
+  prompts:
+    search_o1_finalize:
+      input:
+        goal_description: token_contract
+        prompt_ls: prompt_ls
+        template: $template
+      output:
+      - prompt_ls
+    search_o1_init:
+      input:
+        goal_description: token_contract
+        q_ls: q_ls
+        template: $template
+      output:
+      - prompt_ls
+    search_o1_insert:
+      input:
+        ans_ls: ans_ls
+        prompt_ls: prompt_ls
+        token_contract: token_contract
+      output:
+      - prompt_ls
+    searcho1_reasoning_indocument:
+      input:
+        extract_query_list: extract_query_list
+        goal_description: token_contract
+        prompt_ls: prompt_ls
+        ret_psg: ret_psg
+        template: $template
+      output:
+      - prompt_ls
+retriever:
+  parameter: servers/retriever/parameter.yaml
+  path: servers/retriever/src/retriever.py
+  tools:
+    retriever_init_readme:
+      input:
+        chroma_collection: $chroma_collection
+        chroma_path: $chroma_path
+        embedding_api_key: $embedding_api_key
+        embedding_api_url: $embedding_api_url
+        embedding_timeout: $embedding_timeout
+    retriever_search_readme:
+      input:
+        query_instruction: $query_instruction
+        query_list: q_ls
+        top_k: $top_k
+      output:
+      - ret_psg
+      - metadata
+router:
+  path: servers/router/src/router.py
+  tools:
+    search_o1_check:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - ans_ls
