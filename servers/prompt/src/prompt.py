@@ -372,5 +372,35 @@ def search_o1_finalize(
     return ret
 
 
+@app.prompt(output="q_ls,allowed_source_types,template->prompt_ls")
+def filter_select(
+    q_ls: List[str],
+    allowed_source_types: List[str],
+    template: str | Path,
+) -> List[PromptMessage]:
+    template_obj: Template = load_prompt_template(template)
+    ret: List[PromptMessage] = []
+    for q in q_ls:
+        rendered = template_obj.render(
+            question=q,
+            allowed_types=allowed_source_types or [],
+        )
+        ret.append(rendered)
+    return ret
+
+
+@app.prompt(output="q_ls,template->prompt_ls")
+def query_multiview(
+    q_ls: List[str],
+    template: str | Path,
+) -> List[PromptMessage]:
+    template_obj: Template = load_prompt_template(template)
+    ret: List[PromptMessage] = []
+    for q in q_ls:
+        rendered = template_obj.render(question=q)
+        ret.append(rendered)
+    return ret
+
+
 if __name__ == "__main__":
     app.run(transport="stdio")

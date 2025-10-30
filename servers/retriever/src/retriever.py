@@ -109,6 +109,11 @@ class Retriever:
             name="retriever_search_chroma",
             output="q_ls,top_k,query_instruction->ret_psg,metadata",
         )
+        # New filtered search variant (independent filters)
+        mcp_inst.tool(
+            self.vector_search_filtered,
+            output="query_list,top_k,where_source_type_in,where_repo_id_in->ret_psg,metadata",
+        )
 
     def retriever_init(
         self,
@@ -862,6 +867,8 @@ class Retriever:
                         "repo_name": name,
                         "score": score,
                         "clean_state": clean_state,
+                        "repo_id": m.get("repo_id"),
+                        "source_type": m.get("source_type"),
                     }
                 )
                 flat_hits.append(
@@ -878,6 +885,82 @@ class Retriever:
             meta_rows.append(cur_meta)
 
         return {"ret_psg": ret_psg, "metadata": meta_rows, "hits": flat_hits}
+
+    async def vector_search_filtered(
+        self,
+        query_list: List[str],
+        top_k: int = 10,
+        where_source_type_in: Optional[List[str]] = None,
+        where_repo_id_in: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Vector search with filters for source_type and repo_id (independent params).
+
+        If both filters are empty, behaves like unfiltered vector search.
+        """
+        if not hasattr(self, "chroma_collection"):
+            raise RuntimeError(
+                "README retriever is not initialized; call retriever_init_readme first"
+            )
+
+        if isinstance(query_list, str):
+            query_list = [query_list]
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+
+        embeddings = await self._embed_remote(query_list)
+
+        where: Optional[Dict[str, Any]] = None
+        conds: List[Dict[str, Any]] = []
+        if where_source_type_in:
+            lst = [s for s in where_source_type_in if s]
+            if lst:
+                conds.append({"source_type": {"$in": lst}})
+        if where_repo_id_in:
+            lst = [s for s in where_repo_id_in if s]
+            if lst:
+                conds.append({"repo_id": {"$in": lst}})
+        if len(conds) == 1:
+            where = conds[0]
+        elif len(conds) > 1:
+            where = {"$and": conds}
+
+        results = self.chroma_collection.query(
+            query_embeddings=embeddings,
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+            where=where,
+        )
+
+        documents = results.get("documents") or [[] for _ in query_list]
+        metadatas = results.get("metadatas") or [[] for _ in query_list]
+        distances = results.get("distances") or [[] for _ in query_list]
+
+        ret_psg: List[List[str]] = []
+        meta_rows: List[List[Dict[str, Any]]] = []
+
+        for doc_items, meta_items, dist_items in zip(documents, metadatas, distances):
+            cur_docs: List[str] = []
+            cur_meta: List[Dict[str, Any]] = []
+            for doc, meta, dist in zip(doc_items, meta_items, dist_items):
+                cleaned_text, clean_state = normalize_readme_text(doc)
+                cur_docs.append(cleaned_text)
+                m = meta or {}
+                owner, name = self._owner_name_from_meta(m)
+                score = float(dist) if dist is not None else None
+                cur_meta.append(
+                    {
+                        "repo_author": owner,
+                        "repo_name": name,
+                        "score": score,
+                        "clean_state": clean_state,
+                        "repo_id": m.get("repo_id"),
+                        "source_type": m.get("source_type"),
+                    }
+                )
+            ret_psg.append(cur_docs)
+            meta_rows.append(cur_meta)
+
+        return {"ret_psg": ret_psg, "metadata": meta_rows}
 
     def vector_hits_provenance(self, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Attach provenance for a flattened list of hits using SQLite repo table.

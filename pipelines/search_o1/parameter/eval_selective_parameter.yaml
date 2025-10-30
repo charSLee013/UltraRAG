@@ -1,0 +1,82 @@
+benchmark:
+  benchmark:
+    name: golden_eval_selective
+    path: data/golden_QA.jsonl
+    key_map:
+      q_ls: question
+      gt_ls: golden_answers
+    limit: 3
+    shuffle: false
+    seed: 42
+
+prompt:
+  goal_description: "回答开发者问题并引用检索证据"
+  init_template: prompt/search_o1_reasoning.jinja
+  reasoning_template: prompt/search_o1_refinement.jinja
+  finalize_template: prompt/search_o1_finalize.jinja
+  filter_select_template: prompt/filter_select.jinja
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+  allowed_source_types:
+    - docs_overview
+    - learn
+    - models
+    - datasets
+    - studios
+
+router:
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+
+custom:
+  token_contract:
+    begin_query: "<<SRCH_Q_BEGIN>>"
+    end_query: "<<SRCH_Q_END>>"
+    end_answer: "<<FINAL_ANSWER_END>>"
+    begin_result: "<<SRCH_R_BEGIN>>"
+    end_result: "<<SRCH_R_END>>"
+  allow_fallback: true
+  allowed_source_types:
+    - docs_overview
+    - learn
+    - models
+    - datasets
+    - studios
+
+generation:
+  model_name: ""
+  base_url: ""
+  api_key: ""
+  sampling_params:
+    timeout: 600
+    max_tokens: 2048
+    temperature: 0.2
+    top_p: 0.8
+    extra_body:
+      include_stop_str_in_output: true
+      stop: []
+
+retriever:
+  chroma_path: null
+  chroma_collection: modelscope_docs
+  embedding_api_url: null
+  embedding_api_key: null
+  embedding_timeout: 120
+  top_k: 10
+  query_instruction: "Query: "
+  coarse_top_m: 50
+
+corpus:
+  repo_limit: 50
+
+evaluation:
+  metrics:
+    - cosine
+    - rouge-1
+    - rouge-2
+    - rouge-l
+  save_path: output/golden_eval_selective_results.json

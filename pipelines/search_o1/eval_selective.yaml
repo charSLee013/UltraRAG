@@ -1,0 +1,110 @@
+servers:
+  benchmark: servers/benchmark
+  corpus: servers/corpus
+  retriever: servers/retriever
+  prompt: servers/prompt
+  generation: servers/generation
+  router: servers/router
+  custom: servers/custom
+  evaluation: servers/evaluation
+
+pipeline:
+- benchmark.get_data
+- retriever.retriever_init_readme:
+    input:
+      chroma_path: $chroma_path
+      chroma_collection: $chroma_collection
+      embedding_api_url: $embedding_api_url
+      embedding_api_key: $embedding_api_key
+      embedding_timeout: $embedding_timeout
+- prompt.search_o1_init:
+    input:
+      q_ls: q_ls
+      template: $init_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+  # Extract search query from the initial answer, before filter selection overrides ans_ls
+- custom.search_o1_query_extract:
+    input:
+      token_contract: $token_contract
+
+
+# LLM chooses filter once for the whole batch
+- prompt.filter_select:
+    input:
+      allowed_source_types: $allowed_source_types
+      q_ls: q_ls
+      template: $filter_select_template
+- generation.generate
+- custom.parse_filter_selection:
+    input:
+      allowed_source_types: $allowed_source_types
+      allow_fallback: $allow_fallback
+
+- loop:
+    times: 1
+    steps:
+    # Coarse → refine → final search in a flat sequence to avoid branch skeleton issues
+    - retriever.vector_search_chunks:
+        input:
+          query_list: extract_query_list
+          top_k: $coarse_top_m
+    - custom.meta_to_repo_ids_flat
+    - corpus.sqlite_repo_search_filtered:
+        input:
+          source_type_in: selected_source_types
+          repo_id_regex: selected_repo_regex
+          limit: $repo_limit
+    - custom.intersect_flat
+    - retriever.vector_search_filtered:
+        input:
+          query_list: extract_query_list
+          top_k: $top_k
+          where_repo_id_in: final_repo_ids_flat
+    - prompt.searcho1_reasoning_indocument:
+        input:
+          template: $reasoning_template
+          goal_description: $goal_description
+          token_contract: $token_contract
+    - generation.generate:
+        input:
+          model_name: $model_name
+          base_url: $base_url
+          sampling_params: $sampling_params
+          api_key: $api_key
+    - prompt.search_o1_insert:
+        input:
+          token_contract: $token_contract
+    - generation.generate:
+        input:
+          model_name: $model_name
+          base_url: $base_url
+          sampling_params: $sampling_params
+          api_key: $api_key
+- prompt.search_o1_finalize:
+    input:
+      template: $finalize_template
+      goal_description: $goal_description
+      token_contract: $token_contract
+- generation.generate:
+    input:
+      model_name: $model_name
+      base_url: $base_url
+      sampling_params: $sampling_params
+      api_key: $api_key
+- custom.output_passthrough:
+    input:
+      token_contract: $token_contract
+- evaluation.evaluate:
+    input:
+      pred_ls: markdown_ls
+      gt_ls: gt_ls
+      q_ls: q_ls
+      metrics: $metrics
+      save_path: $save_path

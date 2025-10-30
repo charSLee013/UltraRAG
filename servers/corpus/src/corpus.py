@@ -119,6 +119,55 @@ def _get_sqlite() -> SQLiteStore:  # type: ignore
     return store
 
 
+@app.tool(
+    name="sqlite_repo_search_filtered",
+    output="source_type_in,repo_id_regex,limit->repo_ids,total",
+)
+def sqlite_repo_search_filtered(
+    source_type_in: Optional[List[str]] = None,
+    repo_id_regex: Optional[str] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """Filter repos by source_type IN (...) and/or repo_id REGEXP.
+
+    Notes:
+      - Both filters are independent parameters; do not merge into one 'where'.
+      - If both are empty/None, raise to enforce restricted pipeline contract.
+    """
+    # Validate: at least one filter must be provided (type list or regex)
+    filtered_types = [s for s in (source_type_in or []) if str(s).strip()]
+    no_type = len(filtered_types) == 0
+    no_regex = not (repo_id_regex and str(repo_id_regex).strip())
+    # If no filters provided, treat as 'no filtering here' and let vector layer
+    # perform an unfiltered search (consistent with pipeline fallback semantics).
+    if no_type and no_regex:
+        return {"repo_ids": [], "total": 0}
+
+    store = _get_sqlite()
+    where_sql_parts: List[str] = []
+    args: List[Any] = []
+
+    if filtered_types:
+        placeholders = ",".join(["?"] * len(filtered_types))
+        where_sql_parts.append(f"source_type IN ({placeholders})")
+        args.extend([str(s).strip() for s in filtered_types])
+
+    if repo_id_regex and str(repo_id_regex).strip():
+        where_sql_parts.append("repo_id REGEXP ?")
+        args.append(str(repo_id_regex).strip())
+
+    where_sql = (" WHERE " + " AND ".join(where_sql_parts)) if where_sql_parts else ""
+
+    cur = store.conn.cursor()
+    total = cur.execute(f"SELECT COUNT(1) FROM repo{where_sql}", args).fetchone()[0]
+    cur = store.conn.execute(
+        f"SELECT repo_id FROM repo{where_sql} LIMIT ?",
+        args + [max(0, int(limit))],
+    )
+    repo_ids = [r[0] for r in cur.fetchall()]
+    return {"repo_ids": repo_ids, "total": int(total)}
+
+
 @app.tool(output="source_type,owner_regex,limit->owner_repos,repo_ids,total")
 def sqlite_repo_search(
     source_type: Optional[Union[str, List[str]]] = None,

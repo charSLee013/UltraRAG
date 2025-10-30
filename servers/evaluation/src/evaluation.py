@@ -5,6 +5,9 @@ import string
 from collections import Counter
 from datetime import datetime
 from typing import Any, Callable, Dict, List
+import math
+import httpx
+import numpy as np
 
 from rouge_score import rouge_scorer
 from tabulate import tabulate
@@ -162,6 +165,42 @@ def compute_metrics(
     pred_list: List[str],
     metrics: List[str] | None = None,
 ) -> Dict[str, float]:
+    def _embed_remote(texts: List[str]) -> List[List[float]]:
+        url = os.environ.get("EVAL_EMBEDDING_API_URL") or os.environ.get("EMBEDDING_API_URL")
+        key = os.environ.get("EVAL_EMBEDDING_API_KEY") or os.environ.get("EMBEDDING_API_KEY")
+        model = os.environ.get("EVAL_EMBEDDING_MODEL") or os.environ.get("EMBEDDING_MODEL")
+        timeout = int(os.environ.get("EVAL_EMBEDDING_TIMEOUT") or os.environ.get("EMBEDDING_TIMEOUT") or 60)
+        if not (url and key and model):
+            raise RuntimeError("Missing embedding config: set EVAL_EMBEDDING_* or EMBEDDING_* in .env for cosine metric")
+        payload = {"model": model, "input": texts, "encoding_format": "float"}
+        headers = {"Authorization": f"Bearer {key}"}
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        emb = [item["embedding"] for item in data.get("data", [])]
+        if len(emb) != len(texts):
+            raise RuntimeError("Embedding service returned mismatched result count")
+        return emb
+
+    def _cosine(a: List[float], b: List[float]) -> float:
+        va, vb = np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)
+        na = np.linalg.norm(va)
+        nb = np.linalg.norm(vb)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(va, vb) / (na * nb))
+
+    def cosine_sim_score(gt: List[str], pred: str) -> float:
+        if not pred or not gt:
+            return 0.0
+        # Embed pred + all gts in one call
+        texts = [pred] + gt
+        emb = _embed_remote(texts)
+        e_pred, e_gts = emb[0], emb[1:]
+        sims = [_cosine(e_pred, eg) for eg in e_gts]
+        return max(sims) if sims else 0.0
+
     METRICS_REGISTRY: Dict[str, Callable[[List[str], str], float]] = {
         "acc": accuracy_score,
         "em": exact_match_score,
@@ -171,6 +210,7 @@ def compute_metrics(
         "rouge-1": rouge1_score,
         "rouge-2": rouge2_score,
         "rouge-l": rougel_score,
+        "cosine": cosine_sim_score,
     }
     if not metrics:
         metrics = list(METRICS_REGISTRY.keys())

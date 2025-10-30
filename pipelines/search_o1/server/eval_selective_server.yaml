@@ -1,0 +1,185 @@
+benchmark:
+  parameter: servers/benchmark/parameter.yaml
+  path: servers/benchmark/src/benchmark.py
+  tools:
+    get_data:
+      input:
+        benchmark: $benchmark
+      output:
+      - q_ls
+      - gt_ls
+corpus:
+  parameter: servers/corpus/parameter.yaml
+  path: servers/corpus/src/corpus.py
+  tools:
+    sqlite_repo_search_filtered:
+      input:
+        source_type_in: selected_source_types
+        repo_id_regex: selected_repo_regex
+        limit: $repo_limit
+      output:
+      - repo_ids
+      - total
+custom:
+  parameter: servers/custom/parameter.yaml
+  path: servers/custom/src/custom.py
+  tools:
+    meta_to_repo_ids_flat:
+      input:
+        metadata: metadata
+      output:
+      - candidate_repo_ids_flat
+    intersect_flat:
+      input:
+        candidate_repo_ids_flat: candidate_repo_ids_flat
+        filtered_repo_ids: repo_ids
+        allow_fallback: $allow_fallback
+      output:
+      - final_repo_ids_flat
+    meta_to_repo_ids:
+      input:
+        metadata: metadata
+      output:
+      - candidate_repo_ids
+    meta_to_repo_ids_flat:
+      input:
+        metadata: metadata
+      output:
+      - candidate_repo_ids_flat
+    intersect_repo_ids:
+      input:
+        candidate_repo_ids: candidate_repo_ids
+        filtered_repo_ids: repo_ids
+        allow_fallback: $allow_fallback
+      output:
+      - final_repo_ids
+    intersect_repo_ids_flat:
+      input:
+        candidate_repo_ids_flat: candidate_repo_ids_flat
+        filtered_repo_ids: repo_ids
+        allow_fallback: $allow_fallback
+      output:
+      - final_repo_ids_flat
+    parse_filter_selection:
+      input:
+        ans_ls: ans_ls
+        allowed_source_types: $allowed_source_types
+        allow_fallback: $allow_fallback
+      output:
+      - selected_source_types
+      - selected_repo_regex
+      - selected_filter_raw
+    output_passthrough:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - markdown_ls
+    search_o1_query_extract:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - extract_query_list
+evaluation:
+  parameter: servers/evaluation/parameter.yaml
+  path: servers/evaluation/src/evaluation.py
+  tools:
+    evaluate:
+      input:
+        pred_ls: pred_ls
+        gt_ls: gt_ls
+        q_ls: q_ls
+        metrics: $metrics
+        save_path: $save_path
+      output:
+      - eval_res
+generation:
+  parameter: servers/generation/parameter.yaml
+  path: servers/generation/src/generation.py
+  tools:
+    generate:
+      input:
+        api_key: $api_key
+        base_url: $base_url
+        model_name: $model_name
+        prompt_ls: prompt_ls
+        sampling_params: $sampling_params
+      output:
+      - ans_ls
+prompt:
+  parameter: servers/prompt/parameter.yaml
+  path: servers/prompt/src/prompt.py
+  prompts:
+    filter_select:
+      input:
+        allowed_source_types: $allowed_source_types
+        q_ls: q_ls
+        template: $filter_select_template
+      output:
+      - prompt_ls
+    search_o1_finalize:
+      input:
+        goal_description: token_contract
+        prompt_ls: prompt_ls
+        template: $template
+      output:
+      - prompt_ls
+    search_o1_init:
+      input:
+        goal_description: token_contract
+        q_ls: q_ls
+        template: $template
+      output:
+      - prompt_ls
+    search_o1_insert:
+      input:
+        ans_ls: ans_ls
+        prompt_ls: prompt_ls
+        token_contract: token_contract
+      output:
+      - prompt_ls
+    searcho1_reasoning_indocument:
+      input:
+        extract_query_list: extract_query_list
+        goal_description: token_contract
+        prompt_ls: prompt_ls
+        ret_psg: ret_psg
+        template: $template
+      output:
+      - prompt_ls
+retriever:
+  parameter: servers/retriever/parameter.yaml
+  path: servers/retriever/src/retriever.py
+  tools:
+    vector_search_chunks:
+      input:
+        query_list: extract_query_list
+        top_k: $coarse_top_m
+      output:
+      - ret_psg
+      - metadata
+    retriever_init_readme:
+      input:
+        chroma_collection: $chroma_collection
+        chroma_path: $chroma_path
+        embedding_api_key: $embedding_api_key
+        embedding_api_url: $embedding_api_url
+        embedding_timeout: $embedding_timeout
+    vector_search_filtered:
+      input:
+        query_list: extract_query_list
+        top_k: $top_k
+        where_repo_id_in: final_repo_ids_flat
+      output:
+      - ret_psg
+      - metadata
+router:
+  path: servers/router/src/router.py
+  tools:
+    search_o1_check:
+      input:
+        ans_ls: ans_ls
+        token_contract: token_contract
+      output:
+      - ans_ls
